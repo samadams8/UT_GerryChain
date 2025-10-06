@@ -56,13 +56,6 @@ from gerrychain.metrics import (
 from functools import partial
 from gerrychain.updaters.locality_split_scores import LocalitySplits
 
-# GerryTools imports for enhanced metrics
-from gerrytools.scoring import (
-    seats, efficiency_gap as gt_efficiency_gap, 
-    mean_median as gt_mean_median, partisan_bias as gt_partisan_bias,
-    partisan_gini, summarize
-)
-
 # Spatial operations
 import maup
 
@@ -297,7 +290,15 @@ def detect_election_data(precincts):
             rep_col = f"{year%100:02d}{office}R"
             
             if dem_col in precincts.columns and rep_col in precincts.columns:
-                available_elections.append(f"{year}_{office}")
+                # Exclude elections where either party has zero statewide votes
+                try:
+                    dem_total = float(precincts[dem_col].fillna(0).sum())
+                    rep_total = float(precincts[rep_col].fillna(0).sum())
+                    if dem_total > 0 and rep_total > 0:
+                        available_elections.append(f"{year}_{office}")
+                except Exception:
+                    # If summation fails, skip this election
+                    pass
     
     return available_elections
 
@@ -313,47 +314,25 @@ def get_election_columns(precincts):
     return sorted(election_columns)
 
 def calculate_partisan_metrics(partition, available_elections):
-    """Calculate partisan metrics for a partition using gerrytools."""
+    """Calculate partisan metrics per election using GerryChain metrics."""
     metrics = {}
-    
     if not available_elections:
         return metrics
-    
-    try:
-        # Create election data for gerrytools
-        elections = []
-        for election in available_elections:
-            year, office = election.split('_')
-            dem_col = f"{year%100:02d}{office}D"
-            rep_col = f"{year%100:02d}{office}R"
-            
-            # Check if columns exist in the graph nodes
-            first_node = list(partition.graph.nodes)[0]
-            if dem_col in partition.graph.nodes[first_node] and rep_col in partition.graph.nodes[first_node]:
-                elections.append({
-                    "name": election,
-                    "dem_col": dem_col,
-                    "rep_col": rep_col
-                })
-        
-        if elections:
-            # Use gerrytools scoring functions
-            partisan_scores = [
-                seats(elections, "Dem"),
-                seats(elections, "Rep"),
-                gt_efficiency_gap(elections, mean=True),
-                gt_mean_median(elections),
-                gt_partisan_bias(elections),
-                partisan_gini(elections),
-            ]
-            
-            # Apply scores to partition
-            partisan_results = summarize(partition, partisan_scores)
-            metrics.update(partisan_results)
-            
-    except Exception as e:
-        print(f"Warning: Could not calculate partisan metrics: {e}")
-    
+
+    for election in available_elections:
+        if election in partition.updaters:
+            try:
+                election_results = partition[election]
+                # Compute standard metrics
+                metrics[f"{election}_efficiency_gap"] = efficiency_gap(election_results)
+                metrics[f"{election}_mean_median"] = mean_median(election_results)
+                metrics[f"{election}_partisan_bias"] = partisan_bias(election_results)
+            except Exception as e:
+                print(f"Warning: partisan metrics failed for {election}: {e}")
+                metrics[f"{election}_efficiency_gap"] = None
+                metrics[f"{election}_mean_median"] = None
+                metrics[f"{election}_partisan_bias"] = None
+
     return metrics
 
 def calculate_compactness_metrics(partition):
@@ -368,15 +347,13 @@ def calculate_compactness_metrics(partition):
     return metrics
 
 def create_initial_partition(graph, precincts, updaters_dict):
-    """Create initial partition from the 2021 congressional plan."""
+    """Create initial partition from the supplied plan assignment."""
     print("Creating initial partition...")
-    
     initial_partition = GeographicPartition(
         graph,
         assignment="CONGDIST",
         updaters=updaters_dict
     )
-    
     print(f"Initial partition created with {len(initial_partition)} districts")
     return initial_partition
 
@@ -491,9 +468,12 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
                         # Use the votes() method which returns a tuple of district totals
                         party_votes = election_results.votes(party)
                         step_results[f"{election}_{party}_total"] = sum(party_votes)
+                        # Store per-district votes
+                        step_results[f"{election}_{party}_votes_by_district"] = list(party_votes)
                     except Exception as e:
                         print(f"Error getting {election} {party} totals: {e}")
                         step_results[f"{election}_{party}_total"] = 0
+                        step_results[f"{election}_{party}_votes_by_district"] = []
                 
                 # Store wins for each party
                 for party in ["Democratic", "Republican"]:
@@ -501,6 +481,29 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
                         step_results[f"{election}_{party}_wins"] = election_results.wins(party)
                     except:
                         step_results[f"{election}_{party}_wins"] = 0
+
+                # Compute per-district margins and percentages
+                try:
+                    dem_votes = step_results.get(f"{election}_Democratic_votes_by_district", [])
+                    rep_votes = step_results.get(f"{election}_Republican_votes_by_district", [])
+                    # Align lengths
+                    num_districts = min(len(dem_votes), len(rep_votes))
+                    dem_votes = dem_votes[:num_districts]
+                    rep_votes = rep_votes[:num_districts]
+                    margins_votes = [int(d - r) for d, r in zip(dem_votes, rep_votes)]
+                    margins_pct = []
+                    for d, r in zip(dem_votes, rep_votes):
+                        total = d + r
+                        if total > 0:
+                            margins_pct.append((d - r) / total)
+                        else:
+                            margins_pct.append(None)
+                    step_results[f"{election}_margin_votes_by_district"] = margins_votes
+                    step_results[f"{election}_margin_pct_by_district"] = margins_pct
+                except Exception as e:
+                    print(f"Error computing per-district margins for {election}: {e}")
+                    step_results[f"{election}_margin_votes_by_district"] = []
+                    step_results[f"{election}_margin_pct_by_district"] = []
         
         # Add compactness metrics
         # compactness = calculate_compactness_metrics(partition)
@@ -598,6 +601,22 @@ def save_results(results, available_elections):
                 col_name = f"{election}_{party}_total"
                 if col_name in result:
                     summary_row[col_name] = result[col_name]
+            # Include per-election partisan metrics if present
+            for metric_name in ["efficiency_gap", "mean_median", "partisan_bias"]:
+                key = f"{election}_{metric_name}"
+                if key in result:
+                    summary_row[key] = result[key]
+            # Include seat counts and optionally per-district margins (flattened summaries)
+            for party in ["Democratic", "Republican"]:
+                wins_key = f"{election}_{party}_wins"
+                if wins_key in result:
+                    summary_row[wins_key] = result[wins_key]
+            # Aggregate per-district margins (mean margin pct) for compact summary
+            margin_pct_key = f"{election}_margin_pct_by_district"
+            if margin_pct_key in result and isinstance(result[margin_pct_key], list) and len(result[margin_pct_key]) > 0:
+                valid = [x for x in result[margin_pct_key] if x is not None]
+                if len(valid) > 0:
+                    summary_row[f"{election}_avg_margin_pct"] = float(sum(valid) / len(valid))
         
         # Add compactness metrics
         # for metric in ["polsby_popper"]:
