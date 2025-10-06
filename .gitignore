@@ -1,3 +1,22 @@
 .venv/
 .DS_Store
-results/*
+results/*# Data and large artifacts
+data/
+results/
+*.shp
+*.dbf
+*.shx
+*.prj
+*.sbn
+*.sbx
+*.cpg
+*.geojson
+*.png
+*.csv
+*.xml
+*.pdf
+
+# Python venv and cache
+.venv/
+__pycache__/
+*.pyc
