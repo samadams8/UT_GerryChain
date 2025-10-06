@@ -735,7 +735,6 @@ def save_results(results, available_elections):
 
 def create_partisan_histogram_plots(summary_df):
     """Create histograms for partisan metrics (mean-median, partisan bias, efficiency gap, partisan gini)."""
-    print("Creating partisan metrics histogram plots...")
     
     # Define the four partisan metrics to plot
     metrics = {
@@ -792,11 +791,9 @@ def create_partisan_histogram_plots(summary_df):
     plt.tight_layout()
     plt.savefig('results/ensemble_partisan_histograms.png', dpi=300, bbox_inches='tight')
     plt.close()
-    print("Partisan metrics histogram plots saved to results/ensemble_partisan_histograms.png")
 
 def create_split_histogram_plots(summary_df):
     """Create histograms for split counts (muni splits, muni extra parts, county splits, county extra parts)."""
-    print("Creating split counts histogram plots...")
     
     # Define the four split metrics to plot
     metrics = {
@@ -844,11 +841,9 @@ def create_split_histogram_plots(summary_df):
     plt.tight_layout()
     plt.savefig('results/ensemble_split_histograms.png', dpi=300, bbox_inches='tight')
     plt.close()
-    print("Split counts histogram plots saved to results/ensemble_split_histograms.png")
 
 def create_shares_and_seats_plots(summary_df):
     """Create violin plots for Republican vote shares across districts and histogram for Republican seats."""
-    print("Creating shares and seats plots...")
     
     # Create figure with two subplots
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
@@ -877,7 +872,7 @@ def create_shares_and_seats_plots(summary_df):
             sns.violinplot(data=share_df, x='District', y='Republican Share', ax=ax1, hue='District', palette='vlag', legend=False)
             
             # Create the specified diverging palette
-            cmap = sns.color_pallete("vlag", as_cmap=True)
+            cmap = sns.color_palette("vlag", as_cmap=True)
             # cmap = sns.diverging_palette(250, 20, l=65, center="dark", as_cmap=True)
             
             # Get the actual range of Republican shares in the data
@@ -891,7 +886,7 @@ def create_shares_and_seats_plots(summary_df):
                 # Use the mean share for this district to determine color
                 median_share = district_data.median()
                 # Get color from diverging colormap
-                color = cmap(normalized_share)
+                color = cmap(median_share)
                 colors.append(color)
             
             # Apply colors to violin plot patches
@@ -901,7 +896,7 @@ def create_shares_and_seats_plots(summary_df):
             ax1.set_title('Distribution of Republican Vote Shares by District', fontsize=12, fontweight='bold')
             ax1.set_xlabel('District')
             ax1.set_ylabel('Republican Vote Share')
-            ax1.axhline(0.5, color='red', linestyle='--', alpha=0.7, label='50% Threshold')
+            ax1.axhline(0.5, color='black', linestyle='--', alpha=0.7, label='50% Threshold')
             ax1.legend()
             ax1.grid(True, alpha=0.3)
             ax1.tick_params(axis='x', rotation=45)
@@ -956,11 +951,10 @@ def create_shares_and_seats_plots(summary_df):
     plt.tight_layout()
     plt.savefig('results/ensemble_shares_and_seats.png', dpi=300, bbox_inches='tight')
     plt.close()
-    print("Shares and seats plot saved to results/ensemble_shares_and_seats.png")
 
 def create_summary_plots(summary_df):
     """Create all summary plots."""
-    print("\nCreating ensemble summary plots...")
+    print("Creating ensemble summary plots...")
     
     # Set style for better-looking plots
     plt.style.use('default')
@@ -970,7 +964,6 @@ def create_summary_plots(summary_df):
     create_partisan_histogram_plots(summary_df)
     create_split_histogram_plots(summary_df)
     create_shares_and_seats_plots(summary_df)
-
 
 def main():
     """Main function to run the ensemble analysis."""
@@ -1025,12 +1018,11 @@ def main():
     
     # Save results
     save_results(results, filtered_elections)
+    print("Ensemble analysis complete!")
     
     # Create summary plots
     summary_df = pd.read_csv("results/ensemble_summary.csv")
     create_summary_plots(summary_df)
-    
-    print("Ensemble analysis complete!")
 
 if __name__ == "__main__":
     main()
