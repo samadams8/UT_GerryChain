@@ -30,6 +30,7 @@ All data should be saved to results/ directory. Also save out a .png of each dis
 
 import os
 import sys
+import argparse
 import random
 import json
 import pandas as pd
@@ -302,6 +303,29 @@ def detect_election_data(precincts):
     
     return available_elections
 
+def filter_elections(available_elections, years=None, offices=None):
+    """Filter the detected elections by selected years and offices."""
+    if years:
+        years_set = set(int(y) for y in years)
+    else:
+        years_set = None
+    if offices:
+        offices_set = set(offices)
+    else:
+        offices_set = None
+    filtered = []
+    for e in available_elections:
+        try:
+            y_str, office = e.split('_')
+            y = int(y_str)
+            if (years_set is None or y in years_set) and (offices_set is None or office in offices_set):
+                filtered.append(e)
+        except Exception:
+            # keep if parsing fails and no filters provided
+            if years_set is None and offices_set is None:
+                filtered.append(e)
+    return filtered
+
 def get_election_columns(precincts):
     """Get all election-related columns from precincts data."""
     election_columns = []
@@ -357,7 +381,7 @@ def create_initial_partition(graph, precincts, updaters_dict):
     print(f"Initial partition created with {len(initial_partition)} districts")
     return initial_partition
 
-def run_ensemble(initial_partition, proposal, constraints_list, available_elections, num_steps=5000, visualize_every=10):
+def run_ensemble(initial_partition, proposal, constraints_list, available_elections, num_steps=5000, visualize_every=10, vote_share_agg="median"):
     """Run the ensemble analysis."""
     print(f"Running ensemble analysis with {num_steps} steps...")
     
@@ -373,9 +397,16 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
     
     for i, partition in enumerate(chain.with_progress_bar()):
         # Calculate metrics for this partition
+        # Compute population deviation from ideal per district
+        pop_dict = dict(partition["population"]) if "population" in partition.updaters else {}
+        if pop_dict:
+            ideal_pop = sum(pop_dict.values()) / len(pop_dict)
+            pop_dev = {k: (abs(float(v) - ideal_pop) / ideal_pop if ideal_pop > 0 else None) for k, v in pop_dict.items()}
+        else:
+            pop_dev = {}
         step_results = {
             "step": i,
-            "population": dict(partition["population"]),
+            "population_deviation": pop_dev,
             # Custom split counting methods
             "muni_splits_custom": partition["muni_splits_custom"],
             "county_splits_custom": partition["county_splits_custom"],
@@ -457,61 +488,112 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
             step_results["muni_ls_num_parts"] = None
         
         # Add election results for each available election
+        # If aggregating, do not record per-election outputs; compute only aggregated Republican share
+        rep_shares_matrix = []
         for election in available_elections:
             if election in partition.updaters:
                 election_results = partition[election]
-                
-                # Get vote totals for each party
-                for party in ["Democratic", "Republican"]:
-                    try:
-                        # Get vote totals for this party across all districts
-                        # Use the votes() method which returns a tuple of district totals
-                        party_votes = election_results.votes(party)
-                        step_results[f"{election}_{party}_total"] = sum(party_votes)
-                        # Store per-district votes
-                        step_results[f"{election}_{party}_votes_by_district"] = list(party_votes)
-                    except Exception as e:
-                        print(f"Error getting {election} {party} totals: {e}")
-                        step_results[f"{election}_{party}_total"] = 0
-                        step_results[f"{election}_{party}_votes_by_district"] = []
-                
-                # Store wins for each party
-                for party in ["Democratic", "Republican"]:
-                    try:
-                        step_results[f"{election}_{party}_wins"] = election_results.wins(party)
-                    except:
-                        step_results[f"{election}_{party}_wins"] = 0
-
-                # Compute per-district margins and percentages
                 try:
-                    dem_votes = step_results.get(f"{election}_Democratic_votes_by_district", [])
-                    rep_votes = step_results.get(f"{election}_Republican_votes_by_district", [])
-                    # Align lengths
-                    num_districts = min(len(dem_votes), len(rep_votes))
-                    dem_votes = dem_votes[:num_districts]
-                    rep_votes = rep_votes[:num_districts]
-                    margins_votes = [int(d - r) for d, r in zip(dem_votes, rep_votes)]
-                    margins_pct = []
-                    for d, r in zip(dem_votes, rep_votes):
-                        total = d + r
-                        if total > 0:
-                            margins_pct.append((d - r) / total)
-                        else:
-                            margins_pct.append(None)
-                    step_results[f"{election}_margin_votes_by_district"] = margins_votes
-                    step_results[f"{election}_margin_pct_by_district"] = margins_pct
+                    # Per-district Republican and Democratic votes
+                    rep_votes = list(election_results.votes("Republican"))
+                    dem_votes = list(election_results.votes("Democratic"))
                 except Exception as e:
-                    print(f"Error computing per-district margins for {election}: {e}")
-                    step_results[f"{election}_margin_votes_by_district"] = []
-                    step_results[f"{election}_margin_pct_by_district"] = []
+                    print(f"Error getting per-district votes for {election}: {e}")
+                    rep_votes = []
+                    dem_votes = []
+
+                # Republican share using partisan votes only: R / (R + D)
+                shares = []
+                n = min(len(rep_votes), len(dem_votes))
+                for i in range(n):
+                    r = rep_votes[i] or 0
+                    d = dem_votes[i] or 0
+                    total = r + d
+                    shares.append((r / total) if total > 0 else None)
+
+                if vote_share_agg == "none":
+                    # Record per-election Republican totals, wins, and shares
+                    try:
+                        step_results[f"{election}_Republican_total"] = sum(rep_votes)
+                    except Exception:
+                        step_results[f"{election}_Republican_total"] = 0
+                    step_results[f"{election}_Republican_votes_by_district"] = rep_votes
+                    try:
+                        step_results[f"{election}_Republican_wins"] = election_results.wins("Republican")
+                    except Exception:
+                        step_results[f"{election}_Republican_wins"] = 0
+                    step_results[f"{election}_Republican_share_by_district"] = shares
+                    # Also compute Republican margin (R-D)/(R+D)
+                    margins_pct = []
+                    for i in range(n):
+                        r = rep_votes[i] or 0
+                        d = dem_votes[i] or 0
+                        total = r + d
+                        margins_pct.append(((r - d) / total) if total > 0 else None)
+                    step_results[f"{election}_margin_pct_by_district"] = margins_pct
+                else:
+                    # Aggregation mode: collect shares only (do not record per-election outputs)
+                    if shares:
+                        rep_shares_matrix.append(shares)
+
+        # Optional aggregation of party vote share across selected elections (default median)
+        if vote_share_agg in ("median", "mean") and len(available_elections) > 0:
+            import statistics
+            try:
+                # Determine number of districts
+                district_ids = list(partition.parts)
+                num_districts = len(district_ids)
+                # aggregate across elections
+                rep_agg = []
+                if rep_shares_matrix:
+                    n = min(len(row) for row in rep_shares_matrix)
+                    for i in range(n):
+                        vals = [row[i] for row in rep_shares_matrix if row[i] is not None]
+                        if len(vals) == 0:
+                            rep_agg.append(None)
+                        else:
+                            rep_agg.append(statistics.median(vals) if vote_share_agg == "median" else sum(vals) / len(vals))
+                    # Store sorted ascending for consistent positional reporting
+                    rep_agg_sorted = sorted(rep_agg)
+                    step_results["Republican_agg_share_by_district"] = rep_agg_sorted
+                    # Aggregated Republican seats: count districts with share > 0.5
+                    rep_seats = sum(1 for v in rep_agg_sorted if v is not None and v > 0.5)
+                    step_results["Republican_agg_seats"] = int(rep_seats)
+                    # Aggregated partisan metrics computed from aggregated shares
+                    valid_shares = [v for v in rep_agg_sorted if v is not None]
+                    if len(valid_shares) > 0:
+                        try:
+                            mean_share = sum(valid_shares) / len(valid_shares)
+                            median_share = statistics.median(valid_shares)
+                            step_results["agg_mean_median"] = float(mean_share - median_share)
+                            # Partisan bias: fraction of districts above mean minus 0.5
+                            above_mean = sum(1 for v in valid_shares if v > mean_share)
+                            step_results["agg_partisan_bias"] = float(above_mean / len(valid_shares) - 0.5)
+                            # Efficiency gap under equal-turnout assumption using partisan shares
+                            # EG = (sum wasted_D - sum wasted_R) / num_districts
+                            wasted_R = 0.0
+                            wasted_D = 0.0
+                            for s in valid_shares:
+                                if s > 0.5:
+                                    wasted_R += s - 0.5
+                                    wasted_D += 1 - s
+                                else:
+                                    wasted_R += s
+                                    wasted_D += 0.5 - s
+                            step_results["agg_efficiency_gap"] = float((wasted_D - wasted_R) / len(valid_shares))
+                        except Exception as e:
+                            print(f"Aggregation metrics error: {e}")
+            except Exception as e:
+                print(f"Aggregation error: {e}")
         
         # Add compactness metrics
         # compactness = calculate_compactness_metrics(partition)
         # step_results.update(compactness)
         
-        # Add partisan metrics using gerrytools
-        partisan_metrics = calculate_partisan_metrics(partition, available_elections)
-        step_results.update(partisan_metrics)
+        # Add partisan metrics: if aggregation is disabled, compute per-election metrics; otherwise use aggregated metrics already computed
+        if vote_share_agg == "none":
+            partisan_metrics = calculate_partisan_metrics(partition, available_elections)
+            step_results.update(partisan_metrics)
         
         results.append(step_results)
         
@@ -595,29 +677,44 @@ def save_results(results, available_elections):
             "muni_ls_num_parts": result.get("muni_ls_num_parts"),
         }
         
-        # Add election metrics
+        # Add aggregated partisan metrics when present
+        for metric_key in ["agg_mean_median", "agg_partisan_bias", "agg_efficiency_gap"]:
+            if metric_key in result:
+                summary_row[metric_key] = result[metric_key]
+
+        # Add election metrics (Republican-focused). If aggregation is enabled, do not include per-election outputs
         for election in available_elections:
-            for party in ["Democratic", "Republican"]:
-                col_name = f"{election}_{party}_total"
-                if col_name in result:
-                    summary_row[col_name] = result[col_name]
-            # Include per-election partisan metrics if present
-            for metric_name in ["efficiency_gap", "mean_median", "partisan_bias"]:
-                key = f"{election}_{metric_name}"
-                if key in result:
-                    summary_row[key] = result[key]
-            # Include seat counts and optionally per-district margins (flattened summaries)
-            for party in ["Democratic", "Republican"]:
-                wins_key = f"{election}_{party}_wins"
-                if wins_key in result:
-                    summary_row[wins_key] = result[wins_key]
-            # Aggregate per-district margins (mean margin pct) for compact summary
-            margin_pct_key = f"{election}_margin_pct_by_district"
-            if margin_pct_key in result and isinstance(result[margin_pct_key], list) and len(result[margin_pct_key]) > 0:
-                valid = [x for x in result[margin_pct_key] if x is not None]
-                if len(valid) > 0:
-                    summary_row[f"{election}_avg_margin_pct"] = float(sum(valid) / len(valid))
+            if "Republican_agg_share_by_district" not in result:
+                rep_total_key = f"{election}_Republican_total"
+                if rep_total_key in result:
+                    summary_row[rep_total_key] = result[rep_total_key]
+                # Include per-election partisan metrics if present
+                for metric_name in ["efficiency_gap", "mean_median", "partisan_bias"]:
+                    key = f"{election}_{metric_name}"
+                    if key in result:
+                        summary_row[key] = result[key]
+                # Include Republican seat counts
+                rep_wins_key = f"{election}_Republican_wins"
+                if rep_wins_key in result:
+                    summary_row[rep_wins_key] = result[rep_wins_key]
+                # Aggregate per-district margins (mean margin pct) for compact summary
+                margin_pct_key = f"{election}_margin_pct_by_district"
+                if margin_pct_key in result and isinstance(result[margin_pct_key], list) and len(result[margin_pct_key]) > 0:
+                    valid = [x for x in result[margin_pct_key] if x is not None]
+                    if len(valid) > 0:
+                        summary_row[f"{election}_avg_margin_pct"] = float(sum(valid) / len(valid))
         
+        # Include aggregated Republican vote share and seats if present
+        key = "Republican_agg_share_by_district"
+        if "Republican_agg_seats" in result:
+            summary_row["Republican_agg_seats"] = int(result["Republican_agg_seats"]) if result["Republican_agg_seats"] is not None else None
+
+        # Include aggregated share by district as separate columns at the end
+        if key in result and isinstance(result[key], list) and len(result[key]) > 0:
+            for idx, share in enumerate(result[key], start=1):
+                col_name = f"Republican_agg_share_d{idx}"
+                summary_row[col_name] = None if share is None else float(share)
+
         # Add compactness metrics
         # for metric in ["polsby_popper"]:
         #     if metric in result:
@@ -626,6 +723,11 @@ def save_results(results, available_elections):
         summary_data.append(summary_row)
     
     summary_df = pd.DataFrame(summary_data)
+
+    # Reorder columns to ensure district aggregated share columns come last
+    district_cols = [c for c in summary_df.columns if c.startswith("Republican_agg_share_d")]
+    non_district_cols = [c for c in summary_df.columns if c not in district_cols]
+    summary_df = summary_df[non_district_cols + district_cols]
     summary_df.to_csv("results/ensemble_summary.csv", index=False)
     
     print(f"Results saved to results/ directory")
@@ -640,17 +742,33 @@ def save_results(results, available_elections):
     
     # Comparison block removed (no GerryChain split counters retained)
     
-    # Print election summary
-    for election in available_elections:
-        dem_col = f"{election}_Democratic_total"
-        rep_col = f"{election}_Republican_total"
-        if dem_col in summary_df.columns and rep_col in summary_df.columns:
-            print(f"  {election} - Average Democratic votes: {summary_df[dem_col].mean():.0f}")
-            print(f"  {election} - Average Republican votes: {summary_df[rep_col].mean():.0f}")
+    # Print election summary (Republican-focused). Skip per-election printing if aggregation used
+    if "Republican_agg_share_mean" not in summary_df.columns:
+        for election in available_elections:
+            rep_col = f"{election}_Republican_total"
+            if rep_col in summary_df.columns:
+                print(f"  {election} - Average Republican votes: {summary_df[rep_col].mean():.0f}")
+    else:
+        # Print aggregated partisan metrics
+        if "Republican_agg_seats" in summary_df.columns:
+            print(f"  Aggregated Republican seats (avg): {summary_df['Republican_agg_seats'].mean():.2f}")
+        if "agg_mean_median" in summary_df.columns:
+            print(f"  Aggregated mean-median: {summary_df['agg_mean_median'].mean():.3f}")
+        if "agg_partisan_bias" in summary_df.columns:
+            print(f"  Aggregated partisan bias: {summary_df['agg_partisan_bias'].mean():.3f}")
+        if "agg_efficiency_gap" in summary_df.columns:
+            print(f"  Aggregated efficiency gap: {summary_df['agg_efficiency_gap'].mean():.3f}")
 
 def main():
     """Main function to run the ensemble analysis."""
     print("Starting Utah redistricting ensemble analysis...")
+    parser = argparse.ArgumentParser(description="Run Utah redistricting ensemble analysis")
+    parser.add_argument("--years", type=str, default="2016,2020,2024", help="Comma-separated list of years to include, e.g., 2016,2020")
+    parser.add_argument("--offices", type=str, default="PRE,GOV,ATG,AUD,TRE", help="Comma-separated list of offices to include, e.g., PRE,GOV,ATG,AUD,TRE,USS")
+    parser.add_argument("--vote-share-agg", type=str, choices=["median", "mean", "none"], default="median", help="Aggregate party vote share across selected elections")
+    parser.add_argument("--steps", type=int, default=20, help="Number of ensemble steps to run")
+    parser.add_argument("--viz-every", type=int, default=5, help="Save visualization every N steps")
+    args = parser.parse_args()
     
     # Load data
     precincts, initial_plan = load_data()
@@ -658,14 +776,18 @@ def main():
     # Detect available election data
     available_elections = detect_election_data(precincts)
     election_columns = get_election_columns(precincts)
-    print(f"Available elections: {available_elections}")
+    # Apply user filters
+    years = [int(x) for x in args.years.split(',') if x.strip().isdigit()] if args.years else None
+    offices = [x.strip() for x in args.offices.split(',') if x.strip()] if args.offices else None
+    filtered_elections = filter_elections(available_elections, years=years, offices=offices)
+    print(f"Available elections: {filtered_elections}")
     print(f"Found {len(election_columns)} election columns")
     
     # Create graph
     graph = create_graph(precincts)
     
     # Create updaters
-    updaters_dict = create_updaters(elections=available_elections, election_columns=election_columns)
+    updaters_dict = create_updaters(elections=filtered_elections, election_columns=election_columns)
     
     # Create initial partition
     initial_partition = create_initial_partition(graph, precincts, updaters_dict)
@@ -681,10 +803,10 @@ def main():
     proposal = create_proposal(ideal_population, precincts)
     
     # Run ensemble
-    results = run_ensemble(initial_partition, proposal, constraints_list, available_elections, num_steps=20, visualize_every=5)
+    results = run_ensemble(initial_partition, proposal, constraints_list, filtered_elections, num_steps=args.steps, visualize_every=args.viz_every, vote_share_agg=args.vote_share_agg)
     
     # Save results
-    save_results(results, available_elections)
+    save_results(results, filtered_elections)
     
     print("Ensemble analysis complete!")
 
