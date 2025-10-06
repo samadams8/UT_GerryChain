@@ -58,6 +58,7 @@ import geopandas as gpd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import seaborn as sns
 from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
@@ -124,6 +125,20 @@ def create_graph(precincts):
     graph = Graph.from_geodataframe(precincts)
     print(f"Graph created with {len(graph.nodes)} nodes and {len(graph.edges)} edges")
     return graph
+
+def load_county_boundaries(precincts):
+    """Load county boundaries for visualization overlay."""
+    county_path = "data/cois/UtahCountyBoundaries/ut_cnty_2020_bound.shp"
+    counties = None
+    if os.path.exists(county_path):
+        print(f"Loading county boundaries from {county_path}...")
+        counties = gpd.read_file(county_path)
+        # Transform to same CRS as precincts
+        counties = counties.to_crs(precincts.crs)
+        print(f"Loaded {len(counties)} counties")
+    else:
+        print(f"Warning: {county_path} not found.")
+    return counties
 
 def count_municipality_splits(partition):
     """Count number of municipalities split across districts."""
@@ -372,7 +387,7 @@ def create_initial_partition(graph, precincts, updaters_dict):
     print(f"Initial partition created with {len(initial_partition)} districts")
     return initial_partition
 
-def run_ensemble(initial_partition, proposal, constraints_list, available_elections, num_steps=5000, visualize_every=10, vote_share_agg="median"):
+def run_ensemble(initial_partition, proposal, constraints_list, available_elections, counties=None, num_steps=5000, visualize_every=10, vote_share_agg="median"):
     """Run the ensemble analysis."""
     print(f"Running ensemble analysis with {num_steps} steps...")
     
@@ -483,9 +498,9 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
                 # Republican share using partisan votes only: R / (R + D)
                 shares = []
                 n = min(len(rep_votes), len(dem_votes))
-                for i in range(n):
-                    r = rep_votes[i] or 0
-                    d = dem_votes[i] or 0
+                for j in range(n):
+                    r = rep_votes[j] or 0
+                    d = dem_votes[j] or 0
                     total = r + d
                     shares.append((r / total) if total > 0 else None)
 
@@ -503,9 +518,9 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
                     step_results[f"{election}_Republican_share_by_district"] = shares
                     # Also compute Republican margin (R-D)/(R+D)
                     margins_pct = []
-                    for i in range(n):
-                        r = rep_votes[i] or 0
-                        d = dem_votes[i] or 0
+                    for j in range(n):
+                        r = rep_votes[j] or 0
+                        d = dem_votes[j] or 0
                         total = r + d
                         margins_pct.append(((r - d) / total) if total > 0 else None)
                     step_results[f"{election}_margin_pct_by_district"] = margins_pct
@@ -525,8 +540,8 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
                 rep_agg = []
                 if rep_shares_matrix:
                     n = min(len(row) for row in rep_shares_matrix)
-                    for i in range(n):
-                        vals = [row[i] for row in rep_shares_matrix if row[i] is not None]
+                    for j in range(n):
+                        vals = [row[j] for row in rep_shares_matrix if row[j] is not None]
                         if len(vals) == 0:
                             rep_agg.append(None)
                         else:
@@ -566,7 +581,7 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
                             if n > 1:
                                 # Gini = 1 - 2 * sum(i * x_i) / (n * sum(x_i))
                                 # For partisan Gini, we use the seats-votes curve
-                                gini = 1.0 - 2.0 * sum((i + 1) * x for i, x in enumerate(sorted_shares)) / (n * sum(sorted_shares))
+                                gini = 1.0 - 2.0 * sum((j + 1) * x for j, x in enumerate(sorted_shares)) / (n * sum(sorted_shares))
                                 step_results["partisan_gini"] = float(gini)
                             else:
                                 step_results["partisan_gini"] = None
@@ -586,52 +601,39 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
         
         results.append(step_results)
         
-        # Save visualization every 10 steps (since we're running fewer steps)
+        # Save visualization every N steps
         if i % visualize_every == 0:
-            save_visualization(partition, i, step_results)
+            save_visualization(partition, i, step_results, counties)
     
     return results
 
-def save_visualization(partition, step, results):
+def save_visualization(partition, step, results, counties=None):
     """Save visualization of the partition."""
     
     # Create results directory
     os.makedirs("results", exist_ok=True)
     
-    # Load county boundaries for overlay
-    county_path = "data/cois/UtahCountyBoundaries/ut_cnty_2020_bound.shp"
-    counties = None
-    if os.path.exists(county_path):
-        print(f"Loading county boundaries from {county_path}...")
-        counties = gpd.read_file(county_path)
-        # Get CRS from the first node's geometry
-        first_node = list(partition.graph.nodes)[0]
-        node_geometry = partition.graph.nodes[first_node]["geometry"]
-        if hasattr(node_geometry, 'crs'):
-            counties = counties.to_crs(node_geometry.crs)
-    else:
-        print(f"Warning: {county_path} not found.")
-    
-    # Create figure
-    fig, ax = plt.subplots(figsize=(5, 5))
+    # Create figure with proper aspect ratio for Utah
+    fig, ax = plt.subplots(figsize=(12, 8))
     
     # Plot partition
-    partition.plot(ax=ax, cmap='tab20c')
+    partition.plot(ax=ax, cmap='tab20c', edgecolor='white', linewidth=0.5)
     
     # Add county boundaries if available
     if counties is not None:
-        counties.plot(ax=ax, color='black', linewidth=1, alpha=0.5)
+        counties.boundary.plot(ax=ax, color='black', linewidth=1, alpha=0.5)
     
     # Add title with metrics
-    title = f"Step {step}: Muni Splits: {results['muni_splits_custom']}, County Splits: {results['county_splits_custom']}"
-    ax.set_title(title, fontsize=14)
+    title = f"Step {step}: Muni Splits: {results.get('split_munis_count', 0)}, County Splits: {results.get('split_counties_count', 0)}"
+    ax.set_title(title, fontsize=16, fontweight='bold')
     
     # Remove axes
     ax.set_xticks([])
     ax.set_yticks([])
+    ax.set_aspect('equal')
     
-    # Save figure
-    plt.savefig(f"results/step_{step:04d}.png", dpi=150, bbox_inches='tight')
+    # Save figure with higher quality
+    plt.savefig(f"results/step_{step:05d}.png", dpi=300, bbox_inches='tight', facecolor='white')
     plt.close()
 
 def save_results(results, available_elections):
@@ -651,7 +653,6 @@ def save_results(results, available_elections):
         summary_row = {
             "step": result["step"],
             "vote_share_agg": result.get("vote_share_agg", "none"),
-            # Split counts and extra pieces
             "split_counties_count": result.get("split_counties_count", 0),
             "split_counties_extra_parts": result.get("split_counties_extra_parts", 0),
             "split_munis_count": result.get("split_munis_count", 0),
@@ -695,11 +696,6 @@ def save_results(results, available_elections):
             for idx, share in enumerate(result[key], start=1):
                 col_name = f"Republican_agg_share_d{idx}"
                 summary_row[col_name] = None if share is None else float(share)
-
-        # Add compactness metrics
-        # for metric in ["polsby_popper"]:
-        #     if metric in result:
-        #         summary_row[metric] = result[metric]
         
         summary_data.append(summary_row)
     
@@ -717,8 +713,6 @@ def save_results(results, available_elections):
     print(f"  Counties extra parts (avg total): {summary_df['split_counties_extra_parts'].mean():.2f}")
     print(f"  Munis split (avg count): {summary_df['split_munis_count'].mean():.2f}")
     print(f"  Munis extra parts (avg total): {summary_df['split_munis_extra_parts'].mean():.2f}")
-    
-    # Comparison block removed (no GerryChain split counters retained)
     
     # Print election summary (Republican-focused). Skip per-election printing if aggregation used
     if "Republican_agg_share_by_district" not in summary_df.columns:
@@ -739,6 +733,245 @@ def save_results(results, available_elections):
         if "partisan_gini" in summary_df.columns:
             print(f"  Partisan Gini: {summary_df['partisan_gini'].mean():.3f}")
 
+def create_partisan_histogram_plots(summary_df):
+    """Create histograms for partisan metrics (mean-median, partisan bias, efficiency gap, partisan gini)."""
+    print("Creating partisan metrics histogram plots...")
+    
+    # Define the four partisan metrics to plot
+    metrics = {
+        'mean_median': 'Mean-Median Difference',
+        'partisan_bias': 'Partisan Bias', 
+        'efficiency_gap': 'Efficiency Gap',
+        'partisan_gini': 'Partisan Gini'
+    }
+    
+    # Create 2x2 subplots
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes = axes.flatten()
+    
+    for i, (col, title) in enumerate(metrics.items()):
+        if col in summary_df.columns:
+            ax = axes[i]
+            data = summary_df[col].dropna()
+            
+            if len(data) > 0:
+                # Special handling for partisan_bias (discrete values)
+                if col == 'partisan_bias':
+                    # Get unique values and sort them
+                    unique_vals = sorted(data.unique())
+                    # Create bins shifted by half their width
+                    bin_edges = []
+                    for val in unique_vals:
+                        bin_edges.extend([val - 0.25, val + 0.25])
+                    # Remove duplicates and sort
+                    bin_edges = sorted(list(set(bin_edges)))
+                    ax.hist(data, bins=bin_edges, alpha=0.7, color='#6B7280', edgecolor='white', linewidth=0.8)
+                    # Set x-axis ticks to show the discrete values
+                    ax.set_xticks(unique_vals)
+                    # Shift the x-axis by half the bin width (0.25)
+                    ax.set_xlim([min(unique_vals) - 0.5, max(unique_vals) + 0.5])
+                else:
+                    # Regular histogram for continuous data
+                    ax.hist(data, bins=20, alpha=0.7, color='#6B7280', edgecolor='white', linewidth=0.8)
+                
+                ax.set_title(f'Distribution of {title}', fontsize=12, fontweight='bold')
+                ax.set_xlabel(title)
+                ax.set_ylabel('Frequency')
+                ax.grid(True, alpha=0.3)
+                
+                # Add statistics
+                mean_val = data.mean()
+                median_val = data.median()
+                ax.axvline(mean_val, color='red', linestyle='--', alpha=0.8, label=f'Mean: {mean_val:.3f}')
+                ax.axvline(median_val, color='orange', linestyle='--', alpha=0.8, label=f'Median: {median_val:.3f}')
+                ax.legend(fontsize=8)
+            else:
+                ax.text(0.5, 0.5, f'No data for {title}', ha='center', va='center', transform=ax.transAxes)
+                ax.set_title(f'Distribution of {title}', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig('results/ensemble_partisan_histograms.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print("Partisan metrics histogram plots saved to results/ensemble_partisan_histograms.png")
+
+def create_split_histogram_plots(summary_df):
+    """Create histograms for split counts (muni splits, muni extra parts, county splits, county extra parts)."""
+    print("Creating split counts histogram plots...")
+    
+    # Define the four split metrics to plot
+    metrics = {
+        'split_munis_count': 'Municipality Splits',
+        'split_munis_extra_parts': 'Municipality Extra Parts',
+        'split_counties_count': 'County Splits',
+        'split_counties_extra_parts': 'County Extra Parts'
+    }
+    
+    # Create 2x2 subplots
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes = axes.flatten()
+    
+    for i, (col, title) in enumerate(metrics.items()):
+        if col in summary_df.columns:
+            ax = axes[i]
+            data = summary_df[col].dropna()
+            
+            if len(data) > 0:
+                # Use integer bins centered on integers with width 1
+                min_val = int(data.min())
+                max_val = int(data.max())
+                # Add one empty bin on each side (unless min would be negative)
+                bin_min = max(0, min_val - 1)
+                bin_max = max_val + 1
+                bins = [i - 0.5 for i in range(bin_min, bin_max + 1)]
+                ax.hist(data, bins=bins, alpha=0.7, color='#6B7280', edgecolor='white', linewidth=0.8)
+                ax.set_title(f'Distribution of {title}', fontsize=12, fontweight='bold')
+                ax.set_xlabel(title)
+                ax.set_ylabel('Frequency')
+                ax.grid(True, alpha=0.3)
+                # Set x-axis ticks to integers only
+                ax.set_xticks(range(bin_min, bin_max + 1))
+                
+                # Add statistics
+                mean_val = data.mean()
+                median_val = data.median()
+                ax.axvline(mean_val, color='red', linestyle='--', alpha=0.8, label=f'Mean: {mean_val:.1f}')
+                ax.axvline(median_val, color='orange', linestyle='--', alpha=0.8, label=f'Median: {median_val:.1f}')
+                ax.legend(fontsize=8)
+            else:
+                ax.text(0.5, 0.5, f'No data for {title}', ha='center', va='center', transform=ax.transAxes)
+                ax.set_title(f'Distribution of {title}', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig('results/ensemble_split_histograms.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print("Split counts histogram plots saved to results/ensemble_split_histograms.png")
+
+def create_shares_and_seats_plots(summary_df):
+    """Create violin plots for Republican vote shares across districts and histogram for Republican seats."""
+    print("Creating shares and seats plots...")
+    
+    # Create figure with two subplots
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+    
+    # Left plot: Violin plots for vote shares by district
+    share_cols = [col for col in summary_df.columns if col.startswith('Republican_agg_share_d')]
+    
+    if share_cols:
+        # Prepare data for violin plots
+        share_data = []
+        
+        for col in share_cols:
+            district_num = col.split('_')[-1]  # Extract district number (d1, d2, etc.)
+            shares = summary_df[col].dropna()
+            
+            for share in shares:
+                share_data.append({
+                    'District': f'District {district_num[1:]}',  # Remove 'd' prefix
+                    'Republican Share': share
+                })
+        
+        if share_data:
+            share_df = pd.DataFrame(share_data)
+            
+            # Create violin plot with diverging colormap
+            sns.violinplot(data=share_df, x='District', y='Republican Share', ax=ax1, hue='District', palette='vlag', legend=False)
+            
+            # Create the specified diverging palette
+            cmap = sns.color_pallete("vlag", as_cmap=True)
+            # cmap = sns.diverging_palette(250, 20, l=65, center="dark", as_cmap=True)
+            
+            # Get the actual range of Republican shares in the data
+            min_share = share_df['Republican Share'].min()
+            max_share = share_df['Republican Share'].max()
+            
+            # Create colors using the diverging palette with range [0, 1]
+            colors = []
+            for district in share_df['District'].unique():
+                district_data = share_df[share_df['District'] == district]['Republican Share']
+                # Use the mean share for this district to determine color
+                median_share = district_data.median()
+                # Get color from diverging colormap
+                color = cmap(normalized_share)
+                colors.append(color)
+            
+            # Apply colors to violin plot patches
+            for i, patch in enumerate(ax1.collections):
+                if hasattr(patch, 'set_facecolor'):
+                    patch.set_facecolor(colors[i % len(colors)])
+            ax1.set_title('Distribution of Republican Vote Shares by District', fontsize=12, fontweight='bold')
+            ax1.set_xlabel('District')
+            ax1.set_ylabel('Republican Vote Share')
+            ax1.axhline(0.5, color='red', linestyle='--', alpha=0.7, label='50% Threshold')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            ax1.tick_params(axis='x', rotation=45)
+        else:
+            ax1.text(0.5, 0.5, 'No share data available', ha='center', va='center', transform=ax1.transAxes)
+            ax1.set_title('Republican Vote Shares by District', fontsize=12, fontweight='bold')
+    else:
+        ax1.text(0.5, 0.5, 'No Republican vote share data found', ha='center', va='center', transform=ax1.transAxes)
+        ax1.set_title('Republican Vote Shares by District', fontsize=12, fontweight='bold')
+    
+    # Right plot: Histogram for Republican seats
+    if 'Republican_agg_seats' in summary_df.columns:
+        seats_data = summary_df['Republican_agg_seats'].dropna()
+        
+        if len(seats_data) > 0:
+            # Determine the range of possible seats (0 to total districts)
+            # Get total number of districts from the data
+            total_districts = len([col for col in summary_df.columns if col.startswith('Republican_agg_share_d')])
+            if total_districts == 0:
+                # Fallback: use max observed seats + 1
+                max_seats = int(seats_data.max()) + 1
+                bins = range(0, max_seats + 1)
+            else:
+                bins = range(0, total_districts + 1)
+            
+            # Create histogram with explicit bin edges to ensure all values 0-4 are shown
+            bin_edges = [i - 0.5 for i in range(total_districts + 2)]
+            ax2.hist(seats_data, bins=bin_edges, alpha=0.7, color='#6B7280', edgecolor='white', linewidth=0.8)
+            ax2.set_title('Distribution of Republican Seats', fontsize=12, fontweight='bold')
+            ax2.set_xlabel('Number of Republican Seats')
+            ax2.set_ylabel('Frequency')
+            ax2.grid(True, alpha=0.3)
+            
+            # Add statistics
+            mean_val = seats_data.mean()
+            median_val = seats_data.median()
+            ax2.axvline(mean_val, color='red', linestyle='--', alpha=0.8, label=f'Mean: {mean_val:.1f}')
+            ax2.axvline(median_val, color='orange', linestyle='--', alpha=0.8, label=f'Median: {median_val:.1f}')
+            ax2.legend()
+            
+            # Set x-axis to show full range from 0 to total_districts
+            ax2.set_xlim(-0.5, total_districts + 0.5)
+            # Set x-axis ticks to show all integer values
+            ax2.set_xticks(range(total_districts + 1))
+        else:
+            ax2.text(0.5, 0.5, 'No seat data available', ha='center', va='center', transform=ax2.transAxes)
+            ax2.set_title('Distribution of Republican Seats', fontsize=12, fontweight='bold')
+    else:
+        ax2.text(0.5, 0.5, 'No Republican seat data found', ha='center', va='center', transform=ax2.transAxes)
+        ax2.set_title('Distribution of Republican Seats', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig('results/ensemble_shares_and_seats.png', dpi=300, bbox_inches='tight')
+    plt.close()
+    print("Shares and seats plot saved to results/ensemble_shares_and_seats.png")
+
+def create_summary_plots(summary_df):
+    """Create all summary plots."""
+    print("\nCreating ensemble summary plots...")
+    
+    # Set style for better-looking plots
+    plt.style.use('default')
+    sns.set_palette("Blues")
+    
+    # Create plots
+    create_partisan_histogram_plots(summary_df)
+    create_split_histogram_plots(summary_df)
+    create_shares_and_seats_plots(summary_df)
+
+
 def main():
     """Main function to run the ensemble analysis."""
     print("Starting Utah redistricting ensemble analysis...")
@@ -749,9 +982,13 @@ def main():
     parser.add_argument("--steps", type=int, default=20, help="Number of ensemble steps to run")
     parser.add_argument("--viz-every", type=int, default=5, help="Save visualization every N steps")
     args = parser.parse_args()
-    
+
     # Load data
     precincts, initial_plan = load_data()
+    
+    # Load county boundaries for visualization
+    print("Loading county boundaries...")
+    counties = load_county_boundaries(precincts)
     
     # Detect available election data
     available_elections = detect_election_data(precincts)
@@ -762,7 +999,8 @@ def main():
     filtered_elections = filter_elections(available_elections, years=years, offices=offices)
     print(f"Available elections: {filtered_elections}")
     print(f"Found {len(election_columns)} election columns")
-    
+
+    print("Initializing MCMC...")
     # Create graph
     graph = create_graph(precincts)
     
@@ -783,10 +1021,14 @@ def main():
     proposal = create_proposal(ideal_population, precincts)
     
     # Run ensemble
-    results = run_ensemble(initial_partition, proposal, constraints_list, filtered_elections, num_steps=args.steps, visualize_every=args.viz_every, vote_share_agg=args.vote_share_agg)
+    results = run_ensemble(initial_partition, proposal, constraints_list, filtered_elections, counties=counties, num_steps=args.steps, visualize_every=args.viz_every, vote_share_agg=args.vote_share_agg)
     
     # Save results
     save_results(results, filtered_elections)
+    
+    # Create summary plots
+    summary_df = pd.read_csv("results/ensemble_summary.csv")
+    create_summary_plots(summary_df)
     
     print("Ensemble analysis complete!")
 
