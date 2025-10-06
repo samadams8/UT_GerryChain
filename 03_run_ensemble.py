@@ -15,17 +15,37 @@ Neutral redistricting standards, in priority order:
 6. following natural and geographic features, boundaries, and barriers; and [Aligns well with county lines; no additional work]
 7. maximizing boundary agreement among different types of districts. [No additional work]
 
-Things to measure after each iteration:
-- Number of city splits
-- Number of county splits
-- Compactness of districts
-- Partisan metrics, based on the average partisan preference for each election year with data
-    - Partisan bias
-    - Mean median difference
-    - Efficiency gap
-    - Number of seats each party wins
-    - R/D margins in each district
-All data should be saved to results/ directory. Also save out a .png of each districting plan with the number of city and county splits labeled on the map.
+Metrics saved in results/ensemble_results.json and results/ensemble_summary.csv:
+
+Basic metrics:
+- step: ensemble step number
+- population_deviation: per-district population deviation from ideal (as fraction)
+- vote_share_agg: aggregation method used ("median", "mean", or "none")
+
+Split metrics:
+- split_counties_count: number of counties split across districts
+- split_counties_extra_parts: total extra parts (n-1) for split counties
+- split_munis_count: number of municipalities split across districts  
+- split_munis_extra_parts: total extra parts (n-1) for split municipalities
+- split_counties_names: list of split county names
+- split_munis_names: list of split municipality names
+
+
+Partisan metrics (when aggregation enabled):
+- Republican_agg_seats: number of Republican seats under aggregated vote shares
+- mean_median: mean minus median of Republican vote shares across districts
+- partisan_bias: fraction of districts above mean Republican share minus 0.5
+- efficiency_gap: efficiency gap computed from aggregated partisan shares
+- partisan_gini: Gini coefficient of Republican vote shares across districts
+- Republican_agg_share_d1, d2, etc.: sorted Republican vote shares by district
+
+Per-election metrics (when aggregation disabled):
+- {election}_Republican_total: total Republican votes for election
+- {election}_Republican_wins: Republican seats won for election
+- {election}_Republican_share_by_district: Republican vote share per district
+- {election}_margin_pct_by_district: Republican margin per district
+
+All data saved to results/ directory. Visualizations saved as .png files with split counts labeled.
 """
 
 import os
@@ -151,33 +171,6 @@ def count_county_splits(partition):
     
     return splits
 
-def count_coi_splits(partition):
-    """Count number of Communities of Interest split across districts."""
-    # Get COI assignments from the graph nodes
-    coi_districts = {}
-    
-    # Check for different COI types
-    coi_columns = ['HIGHERED_ID', 'METRO_ID', 'SCHDIST_ID']
-    
-    for node in partition.graph.nodes:
-        node_data = partition.graph.nodes[node]
-        district = partition.assignment[node]
-        
-        for coi_col in coi_columns:
-            if coi_col in node_data and node_data[coi_col]:
-                coi_id = f"{coi_col}_{node_data[coi_col]}"
-                
-                if coi_id not in coi_districts:
-                    coi_districts[coi_id] = set()
-                coi_districts[coi_id].add(district)
-    
-    # Count splits: number of districts each COI appears in minus 1
-    total_splits = 0
-    for coi_id, districts in coi_districts.items():
-        if len(districts) > 1:
-            total_splits += len(districts) - 1
-    
-    return total_splits
 
 def create_updaters(elections=[], election_columns=[]):
     """Create updaters for the ensemble analysis."""
@@ -191,7 +184,6 @@ def create_updaters(elections=[], election_columns=[]):
         # Custom split counting methods (for comparison)
         "muni_splits_custom": count_municipality_splits,
         "county_splits_custom": count_county_splits,
-        "coi_splits": count_coi_splits,
         # Locality split scores for counties and municipalities
         "county_locality_splits": LocalitySplits(
             name="county_locality_splits",
@@ -224,7 +216,6 @@ def create_updaters(elections=[], election_columns=[]):
                     parties_to_columns={"Democratic": dem_col, "Republican": rep_col}
                 )
                 updaters_dict[election] = election_updater
-                print(f"Added election updater for {election}: {dem_col} vs {rep_col}")
     
     return updaters_dict
 
@@ -407,30 +398,35 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
         step_results = {
             "step": i,
             "population_deviation": pop_dev,
-            # Custom split counting methods
-            "muni_splits_custom": partition["muni_splits_custom"],
-            "county_splits_custom": partition["county_splits_custom"],
-            "coi_splits": partition["coi_splits"],
-            # (removed) GerryChain direct split counters; using custom + locality splits
+            "vote_share_agg": vote_share_agg,
         }
         
-        # Build county split info (IDs, names, n-1 parts) using assignment
-        county_to_districts = {}
-        for node in partition.graph.nodes:
-            node_data = partition.graph.nodes[node]
-            county_id = node_data.get("COUNTYID")
-            if county_id:
-                dist = partition.assignment[node]
-                if county_id not in county_to_districts:
-                    county_to_districts[county_id] = set()
-                county_to_districts[county_id].add(dist)
-        # Build compact county split info for counts only
-        county_splits_info = {cid: (len(dists) > 1, list(dists)) for cid, dists in county_to_districts.items()}
+        # Use LocalitySplits updaters to compute split counts and extra pieces
+        try:
+            county_ls = partition["county_locality_splits"]
+            # num_split_localities = number of split counties, num_parts = total locality-district pairs
+            step_results["split_counties_count"] = county_ls.get("num_split_localities", 0)
+            # Get total number of counties to compute extra pieces
+            total_counties = len(set(partition.graph.nodes[node].get("COUNTYID") for node in partition.graph.nodes if partition.graph.nodes[node].get("COUNTYID")))
+            step_results["split_counties_extra_parts"] = county_ls.get("num_parts", 0) - total_counties
+        except Exception as e:
+            print(f"Warning: county locality splits failed: {e}")
+            step_results["split_counties_count"] = 0
+            step_results["split_counties_extra_parts"] = 0
 
-        # Add list of split county IDs from GerryChain tracker
-        step_results["split_counties"] = sorted([cid for cid, (is_split, seen) in county_splits_info.items() if is_split])
+        try:
+            muni_ls = partition["muni_locality_splits"]
+            # num_split_localities = number of split municipalities, num_parts = total locality-district pairs
+            step_results["split_munis_count"] = muni_ls.get("num_split_localities", 0)
+            # Get total number of municipalities to compute extra pieces
+            total_munis = len(set(partition.graph.nodes[node].get("MUNIID") for node in partition.graph.nodes if partition.graph.nodes[node].get("MUNIID")))
+            step_results["split_munis_extra_parts"] = muni_ls.get("num_parts", 0) - total_munis
+        except Exception as e:
+            print(f"Warning: municipality locality splits failed: {e}")
+            step_results["split_munis_count"] = 0
+            step_results["split_munis_extra_parts"] = 0
 
-        # Build ID->name maps (one pass over nodes)
+        # Build ID->name maps for split names (still needed for reporting)
         county_id_to_name = {}
         muni_id_to_name = {}
         for node in partition.graph.nodes:
@@ -444,15 +440,19 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
             if mid is not None and mid != "" and mid not in muni_id_to_name and mname:
                 muni_id_to_name[mid] = mname
 
-        # County splits using gerrychain tracker (counts and (n-1) parts total)
-        split_counties = step_results["split_counties"]
-        counties_split_count = len(split_counties)
-        counties_parts_minus_one_total = sum(len(seen) - 1 for (is_split, seen) in county_splits_info.values() if is_split)
-        step_results["counties_split_count"] = counties_split_count
-        step_results["counties_parts_minus_one_total"] = int(counties_parts_minus_one_total)
+        # Get split names for reporting (using custom logic for now)
+        county_to_districts = {}
+        for node in partition.graph.nodes:
+            node_data = partition.graph.nodes[node]
+            county_id = node_data.get("COUNTYID")
+            if county_id:
+                dist = partition.assignment[node]
+                if county_id not in county_to_districts:
+                    county_to_districts[county_id] = set()
+                county_to_districts[county_id].add(dist)
+        split_counties = sorted([cid for cid, dists in county_to_districts.items() if len(dists) > 1])
         step_results["split_counties_names"] = sorted([county_id_to_name.get(cid, str(cid)) for cid in split_counties])
 
-        # Municipality splits using node attributes (counts and (n-1) parts total)
         muni_to_districts = {}
         for node in partition.graph.nodes:
             node_data = partition.graph.nodes[node]
@@ -463,29 +463,7 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
                     muni_to_districts[muni_id] = set()
                 muni_to_districts[muni_id].add(dist)
         split_munis = sorted([m for m, dists in muni_to_districts.items() if len(dists) > 1])
-        munis_split_count = len(split_munis)
-        munis_parts_minus_one_total = sum(len(dists) - 1 for m, dists in muni_to_districts.items() if len(dists) > 1)
-        step_results["split_munis"] = split_munis
-        step_results["munis_split_count"] = munis_split_count
-        step_results["munis_parts_minus_one_total"] = int(munis_parts_minus_one_total)
         step_results["split_munis_names"] = sorted([muni_id_to_name.get(mid, str(mid)) for mid in split_munis])
-
-        # Track LocalitySplits scores
-        # Each LocalitySplits updater stores computed scores on access
-        try:
-            county_ls = partition["county_locality_splits"]
-            step_results["county_ls_num_split_localities"] = county_ls.get("num_split_localities")
-            step_results["county_ls_num_parts"] = county_ls.get("num_parts")
-        except Exception:
-            step_results["county_ls_num_split_localities"] = None
-            step_results["county_ls_num_parts"] = None
-        try:
-            muni_ls = partition["muni_locality_splits"]
-            step_results["muni_ls_num_split_localities"] = muni_ls.get("num_split_localities")
-            step_results["muni_ls_num_parts"] = muni_ls.get("num_parts")
-        except Exception:
-            step_results["muni_ls_num_split_localities"] = None
-            step_results["muni_ls_num_parts"] = None
         
         # Add election results for each available election
         # If aggregating, do not record per-election outputs; compute only aggregated Republican share
@@ -565,10 +543,10 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
                         try:
                             mean_share = sum(valid_shares) / len(valid_shares)
                             median_share = statistics.median(valid_shares)
-                            step_results["agg_mean_median"] = float(mean_share - median_share)
+                            step_results["mean_median"] = float(mean_share - median_share)
                             # Partisan bias: fraction of districts above mean minus 0.5
                             above_mean = sum(1 for v in valid_shares if v > mean_share)
-                            step_results["agg_partisan_bias"] = float(above_mean / len(valid_shares) - 0.5)
+                            step_results["partisan_bias"] = float(above_mean / len(valid_shares) - 0.5)
                             # Efficiency gap under equal-turnout assumption using partisan shares
                             # EG = (sum wasted_D - sum wasted_R) / num_districts
                             wasted_R = 0.0
@@ -580,7 +558,18 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
                                 else:
                                     wasted_R += s
                                     wasted_D += 0.5 - s
-                            step_results["agg_efficiency_gap"] = float((wasted_D - wasted_R) / len(valid_shares))
+                            step_results["efficiency_gap"] = float((wasted_D - wasted_R) / len(valid_shares))
+                            # Partisan Gini: area between seats-votes curve and its reflection about (.5, .5)
+                            # Sort shares ascending and compute Gini
+                            sorted_shares = sorted(valid_shares)
+                            n = len(sorted_shares)
+                            if n > 1:
+                                # Gini = 1 - 2 * sum(i * x_i) / (n * sum(x_i))
+                                # For partisan Gini, we use the seats-votes curve
+                                gini = 1.0 - 2.0 * sum((i + 1) * x for i, x in enumerate(sorted_shares)) / (n * sum(sorted_shares))
+                                step_results["partisan_gini"] = float(gini)
+                            else:
+                                step_results["partisan_gini"] = None
                         except Exception as e:
                             print(f"Aggregation metrics error: {e}")
             except Exception as e:
@@ -661,24 +650,16 @@ def save_results(results, available_elections):
     for result in results:
         summary_row = {
             "step": result["step"],
-            # Custom split counting methods
-            "muni_splits_custom": result["muni_splits_custom"],
-            "county_splits_custom": result["county_splits_custom"],
-            "coi_splits": result["coi_splits"],
-            # LocalitySplits-driven counts and (n-1) totals
-            "counties_split_count": result.get("counties_split_count", 0),
-            "counties_parts_minus_one_total": result.get("counties_parts_minus_one_total", 0),
-            "munis_split_count": result.get("munis_split_count", 0),
-            "munis_parts_minus_one_total": result.get("munis_parts_minus_one_total", 0),
-            # LocalitySplits scores
-            "county_ls_num_split_localities": result.get("county_ls_num_split_localities"),
-            "county_ls_num_parts": result.get("county_ls_num_parts"),
-            "muni_ls_num_split_localities": result.get("muni_ls_num_split_localities"),
-            "muni_ls_num_parts": result.get("muni_ls_num_parts"),
+            "vote_share_agg": result.get("vote_share_agg", "none"),
+            # Split counts and extra pieces
+            "split_counties_count": result.get("split_counties_count", 0),
+            "split_counties_extra_parts": result.get("split_counties_extra_parts", 0),
+            "split_munis_count": result.get("split_munis_count", 0),
+            "split_munis_extra_parts": result.get("split_munis_extra_parts", 0),
         }
         
         # Add aggregated partisan metrics when present
-        for metric_key in ["agg_mean_median", "agg_partisan_bias", "agg_efficiency_gap"]:
+        for metric_key in ["mean_median", "partisan_bias", "efficiency_gap", "partisan_gini"]:
             if metric_key in result:
                 summary_row[metric_key] = result[metric_key]
 
@@ -732,18 +713,15 @@ def save_results(results, available_elections):
     
     print(f"Results saved to results/ directory")
     print(f"Summary statistics:")
-    print(f"  Average municipality splits (custom): {summary_df['muni_splits_custom'].mean():.2f}")
-    print(f"  Average county splits (custom): {summary_df['county_splits_custom'].mean():.2f}")
-    print(f"  Average COI splits: {summary_df['coi_splits'].mean():.2f}")
-    print(f"  Counties split (avg count): {summary_df['counties_split_count'].mean():.2f}")
-    print(f"  Counties parts minus one (avg total): {summary_df['counties_parts_minus_one_total'].mean():.2f}")
-    print(f"  Munis split (avg count): {summary_df['munis_split_count'].mean():.2f}")
-    print(f"  Munis parts minus one (avg total): {summary_df['munis_parts_minus_one_total'].mean():.2f}")
+    print(f"  Counties split (avg count): {summary_df['split_counties_count'].mean():.2f}")
+    print(f"  Counties extra parts (avg total): {summary_df['split_counties_extra_parts'].mean():.2f}")
+    print(f"  Munis split (avg count): {summary_df['split_munis_count'].mean():.2f}")
+    print(f"  Munis extra parts (avg total): {summary_df['split_munis_extra_parts'].mean():.2f}")
     
     # Comparison block removed (no GerryChain split counters retained)
     
     # Print election summary (Republican-focused). Skip per-election printing if aggregation used
-    if "Republican_agg_share_mean" not in summary_df.columns:
+    if "Republican_agg_share_by_district" not in summary_df.columns:
         for election in available_elections:
             rep_col = f"{election}_Republican_total"
             if rep_col in summary_df.columns:
@@ -752,12 +730,14 @@ def save_results(results, available_elections):
         # Print aggregated partisan metrics
         if "Republican_agg_seats" in summary_df.columns:
             print(f"  Aggregated Republican seats (avg): {summary_df['Republican_agg_seats'].mean():.2f}")
-        if "agg_mean_median" in summary_df.columns:
-            print(f"  Aggregated mean-median: {summary_df['agg_mean_median'].mean():.3f}")
-        if "agg_partisan_bias" in summary_df.columns:
-            print(f"  Aggregated partisan bias: {summary_df['agg_partisan_bias'].mean():.3f}")
-        if "agg_efficiency_gap" in summary_df.columns:
-            print(f"  Aggregated efficiency gap: {summary_df['agg_efficiency_gap'].mean():.3f}")
+        if "mean_median" in summary_df.columns:
+            print(f"  Mean-median: {summary_df['mean_median'].mean():.3f}")
+        if "partisan_bias" in summary_df.columns:
+            print(f"  Partisan bias: {summary_df['partisan_bias'].mean():.3f}")
+        if "efficiency_gap" in summary_df.columns:
+            print(f"  Efficiency gap: {summary_df['efficiency_gap'].mean():.3f}")
+        if "partisan_gini" in summary_df.columns:
+            print(f"  Partisan Gini: {summary_df['partisan_gini'].mean():.3f}")
 
 def main():
     """Main function to run the ensemble analysis."""
