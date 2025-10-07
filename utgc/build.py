@@ -21,6 +21,7 @@ def create_updaters(elections=[], election_columns=[]):
     updaters_dict = {
         "population": updaters.Tally("TOTPOP", alias="population"),
         "cut_edges": updaters.cut_edges,
+        "num_cut_edges": lambda partition: len(partition["cut_edges"]),
         "perimeter": updaters.perimeter,
         "area": updaters.Tally("area", alias="area"),
         "county_locality_splits": LocalitySplits(
@@ -75,16 +76,6 @@ def create_constraints(initial_partition, use_cut_edges=False, max_muni_splits=N
     contiguity_constraint = contiguous
 
     constraints_list = [population_constraint, contiguity_constraint]
-
-    if use_cut_edges:
-        print("Adding cut edges constraint for compactness...")
-        initial_cut_edges = len(initial_partition["cut_edges"])
-        max_cut_edges = int(initial_cut_edges * 1.1)
-
-        def cut_edges_constraint(partition):
-            return len(partition["cut_edges"]) <= max_cut_edges
-
-        constraints_list.append(cut_edges_constraint)
 
     return constraints_list
 

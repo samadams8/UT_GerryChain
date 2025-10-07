@@ -130,7 +130,7 @@ def save_visualization(partition, step, results, counties=None, municipalities=N
     ax_zoom.set_aspect('equal')
 
     plt.tight_layout()
-    plt.savefig(os.path.join(base_dir, f"step_{step:05d}.png"), dpi=600, bbox_inches='tight', facecolor='white')
+    plt.savefig(os.path.join(base_dir, f"step_{step:05d}.png"), dpi=300, bbox_inches='tight', facecolor='white')
     plt.close()
 
 def save_results(results, available_elections, mode=None, out_dir="results"):

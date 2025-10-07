@@ -2,7 +2,6 @@ from gerrychain import MarkovChain, accept
 from gerrychain.optimization import SingleMetricOptimizer
 from .metrics import build_locality_name_maps, compute_split_name_lists, calculate_partisan_metrics
 
-
 def run_ensemble(initial_partition, proposal, constraints_list, available_elections, counties=None, municipalities=None, num_steps=5000, visualize_every=10, vote_share_agg="median", save_visualization_fn=None):
     """Run the ensemble analysis."""
     print(f"Running ensemble analysis with {num_steps} steps...")
@@ -28,6 +27,7 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
             "step": i,
             "population_deviation": pop_dev,
             "vote_share_agg": vote_share_agg,
+            "cut_edges": len(partition["cut_edges"]),
         }
 
         try:
@@ -153,8 +153,6 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
 
     return results
 
-
-
 def run_ensemble_tilted(
     initial_partition,
     proposal,
@@ -175,17 +173,11 @@ def run_ensemble_tilted(
     """
     print(f"Running tilted-run ensemble (minimize cut edges) with {num_steps} steps and p={p}...")
 
-    def num_cut_edges(partition):
-        try:
-            return len(partition["cut_edges"])  # lower is better (more compact)
-        except Exception:
-            return 0
-
     optimizer = SingleMetricOptimizer(
         proposal=proposal,
         constraints=constraints_list,
         initial_state=initial_partition,
-        optimization_metric=num_cut_edges,
+        optimization_metric=lambda partition: len(partition["cut_edges"]),
         maximize=False,
     )
 
@@ -202,7 +194,7 @@ def run_ensemble_tilted(
             "step": i,
             "population_deviation": pop_dev,
             "vote_share_agg": vote_share_agg,
-            "cut_edges": num_cut_edges(partition),
+            "num_cut_edges": lambda partition: len(partition["cut_edges"]),
         }
 
         try:
