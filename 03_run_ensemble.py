@@ -9,11 +9,21 @@ Political data can not be used to help draw lines, only to evaluate whether a pl
 Neutral redistricting standards, in priority order:
 1. Adhering to the Constitution of the United States and federal laws, such as the Voting Rights Act, 52 U.S.C. Secs. 10101 through 10702, including, to the extent required, achieving equal population among districts using the most recent national decennial enumeration made by the authority of the United States; [No more than 0.1% population deviation from the ideal is permitted]
 2. Minimizing the division of municipalities and counties across multiple districts, giving first priority to minimizing the division of municipalities and second priority to minimizing the division of counties; [Use the municipal and county region assignments as a surcharge on region splitting; after each iteration, count how many cities and counties are split across districts]
-3. creating districts that are geographically compact; [Do not apply]
-4. creating districts that are contiguous and that allow for the ease of transportation throughout the district; [No data; unguided]
+3. creating districts that are geographically compact; [Optional cut edges constraint via --use-cut-edges flag]
+4. creating districts that are contiguous and that allow for the ease of transportation throughout the district; [contiguity enforced; ease of transportation seems to emerge naturally from the sum of 5 and 6, as well]
 5. preserving traditional neighborhoods and local communities of interest; [Use the COI data for higher ed, metro/micro statistical areas, and school districts and surcharges]
-6. following natural and geographic features, boundaries, and barriers; and [Aligns well with county lines; no additional work]
+6. following natural and geographic features, boundaries, and barriers; and [Aligns well with county lines in some cases; also includes hydrologic basins and water planning areas]
 7. maximizing boundary agreement among different types of districts. [No additional work]
+
+Command line options for region surcharges:
+--muni-surcharge: Municipality region surcharge (default: 9.0, use 0 to disable)
+--county-surcharge: County region surcharge (default: 3.0, use 0 to disable)
+--highered-surcharge: Higher education COI surcharge (default: 1.0, use 0 to disable)
+--metro-surcharge: Metro/micro statistical area COI surcharge (default: 0.5, use 0 to disable)
+--schdist-surcharge: School district COI surcharge (default: 0.5, use 0 to disable)
+--basin-surcharge: Hydrologic basin COI surcharge (default: 2.0, use 0 to disable)
+--water-surcharge: Water planning area COI surcharge (default: 2.0, use 0 to disable)
+--use-cut-edges: Enable compactness constraint via cut edges minimization
 
 Metrics saved in results/ensemble_results.json and results/ensemble_summary.csv:
 
@@ -248,7 +258,7 @@ def create_updaters(elections=[], election_columns=[]):
     
     return updaters_dict
 
-def create_constraints(initial_partition):
+def create_constraints(initial_partition, use_cut_edges=False):
     """Create constraints according to Utah redistricting requirements."""
     print("Creating constraints...")
     
@@ -260,9 +270,26 @@ def create_constraints(initial_partition):
     # Contiguity constraint
     contiguity_constraint = contiguous
     
-    return [population_constraint, contiguity_constraint]
+    constraints_list = [population_constraint, contiguity_constraint]
+    
+    # Optional cut edges constraint for compactness
+    if use_cut_edges:
+        print("Adding cut edges constraint for compactness...")
+        # Create a constraint that limits the number of cut edges
+        # We'll use the initial partition's cut edges as a baseline
+        initial_cut_edges = len(initial_partition["cut_edges"])
+        max_cut_edges = int(initial_cut_edges * 1.1)  # Allow 10% increase
+        
+        def cut_edges_constraint(partition):
+            return len(partition["cut_edges"]) <= max_cut_edges
+        
+        constraints_list.append(cut_edges_constraint)
+    
+    return constraints_list
 
-def create_proposal(ideal_population, precincts):
+def create_proposal(ideal_population, precincts, muni_surcharge=9, county_surcharge=3, 
+                   highered_surcharge=1, metro_surcharge=0.5, schdist_surcharge=0.5,
+                   basin_surcharge=2.0, water_surcharge=2.0):
     """Create ReCom proposal with region surcharges."""
     print("Creating ReCom proposal...")
     
@@ -270,20 +297,24 @@ def create_proposal(ideal_population, precincts):
     region_surcharge = {}
     
     # Add municipality surcharge if MUNIID column exists
-    if "MUNIID" in precincts.columns:
-        region_surcharge["MUNIID"] = 5  # Higher priority for municipalities
+    if "MUNIID" in precincts.columns and muni_surcharge > 0:
+        region_surcharge["MUNIID"] = muni_surcharge
     
     # Add county surcharge if COUNTYID column exists  
-    if "COUNTYID" in precincts.columns:
-        region_surcharge["COUNTYID"] = 4  # Second priority for counties
+    if "COUNTYID" in precincts.columns and county_surcharge > 0:
+        region_surcharge["COUNTYID"] = county_surcharge
     
     # Add COI surcharges
-    if "HIGHERED_ID" in precincts.columns:
-        region_surcharge["HIGHERED_ID"] = 1
-    if "METRO_ID" in precincts.columns:
-        region_surcharge["METRO_ID"] = 0.5
-    if "SCHDIST_ID" in precincts.columns:
-        region_surcharge["SCHDIST_ID"] = 0.5
+    if "HIGHERED_ID" in precincts.columns and highered_surcharge > 0:
+        region_surcharge["HIGHERED_ID"] = highered_surcharge
+    if "METRO_ID" in precincts.columns and metro_surcharge > 0:
+        region_surcharge["METRO_ID"] = metro_surcharge
+    if "SCHDIST_ID" in precincts.columns and schdist_surcharge > 0:
+        region_surcharge["SCHDIST_ID"] = schdist_surcharge
+    if "BASIN_ID" in precincts.columns and basin_surcharge > 0:
+        region_surcharge["BASIN_ID"] = basin_surcharge
+    if "WATER_ID" in precincts.columns and water_surcharge > 0:
+        region_surcharge["WATER_ID"] = water_surcharge
     
     proposal = partial(
         recom,
@@ -291,7 +322,12 @@ def create_proposal(ideal_population, precincts):
         pop_target=ideal_population,
         epsilon=0.001,
         node_repeats=2,
-        region_surcharge=region_surcharge
+        region_surcharge=region_surcharge,
+        method = partial(
+            bipartition_tree,
+            max_attempts=1000,
+            allow_pair_reselection=True
+        )
     )
     
     print(f"Region surcharges: {region_surcharge}")
@@ -635,7 +671,7 @@ def save_visualization(partition, step, results, counties=None, municipalities=N
     
     # Add municipality boundaries if available (plot first so they appear under county boundaries)
     if municipalities is not None:
-        municipalities.boundary.plot(ax=ax, color='white', linewidth=0.5, alpha=0.5)
+        municipalities.boundary.plot(ax=ax, color='black', linewidth=0.25, alpha=0.5)
     
     # Add county boundaries if available
     if counties is not None:
@@ -643,7 +679,7 @@ def save_visualization(partition, step, results, counties=None, municipalities=N
     
     # Add title with metrics
     title = f"Step {step}: Muni Splits: {results.get('split_munis_count', 0)}, County Splits: {results.get('split_counties_count', 0)}"
-    ax.set_title(title, fontsize=16, fontweight='bold')
+    ax.set_title(title, fontsize=12, fontweight='bold')
     
     # Remove axes
     ax.set_xticks([])
@@ -651,7 +687,7 @@ def save_visualization(partition, step, results, counties=None, municipalities=N
     ax.set_aspect('equal')
     
     # Save figure with higher quality
-    plt.savefig(f"results/step_{step:05d}.png", dpi=300, bbox_inches='tight', facecolor='white')
+    plt.savefig(f"results/step_{step:05d}.png", dpi=600, bbox_inches='tight', facecolor='white')
     plt.close()
 
 def save_results(results, available_elections):
@@ -996,6 +1032,19 @@ def main():
     parser.add_argument("--vote-share-agg", type=str, choices=["median", "mean", "none"], default="median", help="Aggregate party vote share across selected elections")
     parser.add_argument("--steps", type=int, default=21, help="Number of ensemble steps to run")
     parser.add_argument("--viz-every", type=int, default=5, help="Save visualization every N steps")
+    
+    # Region surcharge arguments
+    parser.add_argument("--muni-surcharge", type=float, default=8, help="Municipality region surcharge (0 to disable)")
+    parser.add_argument("--county-surcharge", type=float, default=4, help="County region surcharge (0 to disable)")
+    parser.add_argument("--highered-surcharge", type=float, default=1, help="Higher education COI surcharge (0 to disable)")
+    parser.add_argument("--metro-surcharge", type=float, default=1/2, help="Metro/micro statistical area COI surcharge (0 to disable)")
+    parser.add_argument("--schdist-surcharge", type=float, default=1/2, help="School district COI surcharge (0 to disable)")
+    parser.add_argument("--water-surcharge", type=float, default=1/8, help="Water planning area surcharge (0 to disable)")
+    parser.add_argument("--basin-surcharge", type=float, default=1/8, help="Hydrologic basin surcharge (0 to disable)")
+    
+    # Compactness argument
+    parser.add_argument("--use-cut-edges", action="store_true", help="Enable compactness constraint via cut edges minimization")
+    
     args = parser.parse_args()
 
     # Load data
@@ -1033,10 +1082,27 @@ def main():
     print(f"Ideal population per district: {ideal_population:,.0f}")
     
     # Create constraints
-    constraints_list = create_constraints(initial_partition)
+    constraints_list = create_constraints(initial_partition, use_cut_edges=args.use_cut_edges)
     
     # Create proposal
-    proposal = create_proposal(ideal_population, precincts)
+    print(f"Using region surcharges:")
+    print(f"  Municipality: {args.muni_surcharge}")
+    print(f"  County: {args.county_surcharge}")
+    print(f"  Higher Ed COI: {args.highered_surcharge}")
+    print(f"  Metro/Micro COI: {args.metro_surcharge}")
+    print(f"  School District COI: {args.schdist_surcharge}")
+    print(f"  Hydrologic Basin COI: {args.basin_surcharge}")
+    print(f"  Water Planning Area COI: {args.water_surcharge}")
+    print(f"  Cut edges constraint: {'enabled' if args.use_cut_edges else 'disabled'}")
+    
+    proposal = create_proposal(ideal_population, precincts, 
+                              muni_surcharge=args.muni_surcharge,
+                              county_surcharge=args.county_surcharge,
+                              highered_surcharge=args.highered_surcharge,
+                              metro_surcharge=args.metro_surcharge,
+                              schdist_surcharge=args.schdist_surcharge,
+                              basin_surcharge=args.basin_surcharge,
+                              water_surcharge=args.water_surcharge)
     
     # Run ensemble
     results = run_ensemble(initial_partition, proposal, constraints_list, filtered_elections, counties=counties, municipalities=municipalities, num_steps=args.steps, visualize_every=args.viz_every, vote_share_agg=args.vote_share_agg)

@@ -213,6 +213,32 @@ def load_coi_data():
         print("    Warning: School Districts file not found")
         coi_data['SCHDIST_ID'] = None
     
+    # Hydrologic Basins
+    print("  Processing Hydrologic Basins...")
+    basin_path = "data/cois/UtahHydrologicBasins/HydrologicBasins.shp"
+    if os.path.exists(basin_path):
+        basin = gpd.read_file(basin_path)
+        # Create sequential IDs since no unique ID column exists
+        basin['BASIN_ID'] = range(1, len(basin) + 1)
+        coi_data['BASIN_ID'] = basin[['geometry', 'BASIN_ID']]
+        print(f"    Found {len(basin)} Hydrologic Basins")
+    else:
+        print("    Warning: Hydrologic Basins file not found")
+        coi_data['BASIN_ID'] = None
+    
+    # Water Planning Areas
+    print("  Processing Water Planning Areas...")
+    water_path = "data/cois/UtahWaterPlanningAreas/Planning_Areas.shp"
+    if os.path.exists(water_path):
+        water = gpd.read_file(water_path)
+        # Create sequential IDs since no unique ID column exists
+        water['WATER_ID'] = range(1, len(water) + 1)
+        coi_data['WATER_ID'] = water[['geometry', 'WATER_ID']]
+        print(f"    Found {len(water)} Water Planning Areas")
+    else:
+        print("    Warning: Water Planning Areas file not found")
+        coi_data['WATER_ID'] = None
+    
     return coi_data
 
 def load_municipality_data():
@@ -233,7 +259,7 @@ def assign_coi_to_blocks(blocks, coi_data):
     print("Assigning Communities of Interest to blocks...")
     
     # Initialize COI columns with blank string (not assigned)
-    coi_columns = ['HIGHERED_ID', 'METRO_ID', 'SCHDIST_ID']
+    coi_columns = ['HIGHERED_ID', 'METRO_ID', 'SCHDIST_ID', 'BASIN_ID', 'WATER_ID']
     for col in coi_columns:
         blocks[col] = ''
     
@@ -386,7 +412,7 @@ def main():
         'NH_NHPI': 0, 'NH_OTHER': 0, 'NH_2MORE': 0,
         'HISP': 0, 'H_WHITE': 0, 'H_BLACK': 0, 'H_AMIN': 0,
         'H_ASIAN': 0, 'H_NHPI': 0, 'H_OTHER': 0, 'H_2MORE': 0,
-        'HIGHERED_ID': '', 'METRO_ID': '', 'SCHDIST_ID': ''
+        'HIGHERED_ID': '', 'METRO_ID': '', 'SCHDIST_ID': '', 'BASIN_ID': '', 'WATER_ID': ''
     }
     
     for col, default_val in required_columns.items():
