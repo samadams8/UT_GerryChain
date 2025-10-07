@@ -59,13 +59,13 @@ def run_optimization(
     muni_surcharge=9.0,
     county_surcharge=3.0,
     popdev_tolerance=0.001,
-    optimization_steps=20,
+    steps=20,
     split_munis_tolerance=None,
     split_counties_tolerance=None,
     max_attempts=5,
 ):
     num_districts = len(initial_partition)
-    print(f"Running optimization for {optimization_steps} steps...")
+    print(f"Running optimization for {steps} steps...")
     if split_munis_tolerance is not None and split_counties_tolerance is not None:
         print(
             f"Tolerance thresholds: pop_dev={popdev_tolerance:.4f}, muni_splits={split_munis_tolerance}, county_splits={split_counties_tolerance}"
@@ -103,7 +103,7 @@ def run_optimization(
             print("Starting optimization...")
 
         for i, partition in enumerate(
-            optimizer.short_bursts(5, ceil(optimization_steps / 5), with_progress_bar=True)
+            optimizer.short_bursts(5, ceil(steps / 5), with_progress_bar=True)
         ):
             pass
 

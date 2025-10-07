@@ -194,7 +194,7 @@ def run_ensemble_tilted(
             "step": i,
             "population_deviation": pop_dev,
             "vote_share_agg": vote_share_agg,
-            "num_cut_edges": lambda partition: len(partition["cut_edges"]),
+            "num_cut_edges": len(partition["cut_edges"]),
         }
 
         try:

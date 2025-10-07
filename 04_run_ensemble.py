@@ -46,23 +46,34 @@ def main():
 
     # Build defaults dict to apply precedence: CLI > YAML > defaults
     defaults = {
-        "years": "2016,2020,2024",
-        "offices": "PRE,GOV,ATG,AUD,TRE",
-        "vote_share_agg": "median",
-        "steps": 21,
-        "optim_steps": 20,
-        "max_muni_splits": None,
-        "max_county_splits": None,
-        "viz_every": 5,
-        "muni_surcharge": 9.0,
-        "county_surcharge": 3.0,
-        "highered_surcharge": 1.0,
-        "metro_surcharge": 1.0,
-        "schdist_surcharge": 0.1,
-        "water_surcharge": 0.1,
-        "basin_surcharge": 0.1,
-        "use_cut_edges": False,
-        "tilted_run": 0.5,
+        "constraints": {
+            "use_cut_edges": False,
+            "max_muni_splits": None,
+            "max_county_splits": None,
+        },
+        "proposal": {
+            "muni_surcharge": 9.0,
+            "county_surcharge": 3.0,
+            "highered_surcharge": 1.0,
+            "metro_surcharge": 1.0,
+            "schdist_surcharge": 0.1,
+            "water_surcharge": 0.1,
+            "basin_surcharge": 0.1,
+        },
+        "optimization": {
+            "enable": True,
+            "steps": 20,
+        },
+        "ensemble": {
+            "num_steps": 21,
+            "visualize_every": 5,
+            "tilted_run": 0.5,
+        },
+        "election": {
+            "years": "2016,2020,2024",
+            "offices": "PRE,GOV,ATG,AUD,TRE",
+            "vote_share_agg": "median",
+        }
     }
 
     yaml_config = {}
@@ -108,9 +119,18 @@ def main():
         # Deprecation warning when running without YAML
         print("[DEPRECATION] Running without --config YAML is deprecated and will be removed in a future release. Please provide a YAML config.")
 
-    # Merge values strictly from YAML (no CLI overrides)
-    merged = dict(defaults)
-    merged.update({k: v for k, v in yaml_config.items() if k in merged})
+    # Merge values from YAML with nested structure support
+    def deep_merge(default_dict, yaml_dict):
+        """Deep merge YAML config into defaults, preserving nested structure."""
+        result = dict(default_dict)
+        for key, value in yaml_dict.items():
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = deep_merge(result[key], value)
+            else:
+                result[key] = value
+        return result
+    
+    merged = deep_merge(defaults, yaml_config)
 
     # Determine output directory for this run, matching config tag/name BEFORE running samplers
     # Prefer the name of the params directory to match the source config
@@ -141,8 +161,8 @@ def main():
 
     available_elections = detect_election_data(precincts)
     election_columns = get_election_columns(precincts)
-    years = [int(x) for x in str(merged["years"]).split(',') if x.strip().isdigit()] if merged.get("years") else None
-    offices = [x.strip() for x in str(merged["offices"]).split(',') if x.strip()] if merged.get("offices") else None
+    years = [int(x) for x in str(merged["election"]["years"]).split(',') if x.strip().isdigit()] if merged.get("election", {}).get("years") else None
+    offices = [x.strip() for x in str(merged["election"]["offices"]).split(',') if x.strip()] if merged.get("election", {}).get("offices") else None
     filtered_elections = filter_elections(available_elections, years=years, offices=offices)
     print(f"Available elections: {filtered_elections}")
 
@@ -155,31 +175,31 @@ def main():
 
     constraints_list = create_constraints(
         initial_partition,
-        use_cut_edges=bool(merged["use_cut_edges"]),
-        max_muni_splits=merged["max_muni_splits"],
-        max_county_splits=merged["max_county_splits"],
+        use_cut_edges=bool(merged["constraints"]["use_cut_edges"]),
+        max_muni_splits=merged["constraints"]["max_muni_splits"],
+        max_county_splits=merged["constraints"]["max_county_splits"],
     )
 
     print(f"Using region surcharges:")
-    print(f"  Municipality: {merged['muni_surcharge']}")
-    print(f"  County: {merged['county_surcharge']}")
-    print(f"  Higher Ed COI: {merged['highered_surcharge']}")
-    print(f"  Metro/Micro COI: {merged['metro_surcharge']}")
-    print(f"  School District COI: {merged['schdist_surcharge']}")
-    print(f"  Hydrologic Basin COI: {merged['basin_surcharge']}")
-    print(f"  Water Planning Area COI: {merged['water_surcharge']}")
-    print(f"  Cut edges constraint: {'enabled' if merged['use_cut_edges'] else 'disabled'}")
+    print(f"  Municipality: {merged['proposal']['muni_surcharge']}")
+    print(f"  County: {merged['proposal']['county_surcharge']}")
+    print(f"  Higher Ed COI: {merged['proposal']['highered_surcharge']}")
+    print(f"  Metro/Micro COI: {merged['proposal']['metro_surcharge']}")
+    print(f"  School District COI: {merged['proposal']['schdist_surcharge']}")
+    print(f"  Hydrologic Basin COI: {merged['proposal']['basin_surcharge']}")
+    print(f"  Water Planning Area COI: {merged['proposal']['water_surcharge']}")
+    print(f"  Cut edges constraint: {'enabled' if merged['constraints']['use_cut_edges'] else 'disabled'}")
 
     proposal = create_proposal(
         ideal_population,
         precincts,
-        muni_surcharge=merged["muni_surcharge"],
-        county_surcharge=merged["county_surcharge"],
-        highered_surcharge=merged["highered_surcharge"],
-        metro_surcharge=merged["metro_surcharge"],
-        schdist_surcharge=merged["schdist_surcharge"],
-        basin_surcharge=merged["basin_surcharge"],
-        water_surcharge=merged["water_surcharge"],
+        muni_surcharge=merged["proposal"]["muni_surcharge"],
+        county_surcharge=merged["proposal"]["county_surcharge"],
+        highered_surcharge=merged["proposal"]["highered_surcharge"],
+        metro_surcharge=merged["proposal"]["metro_surcharge"],
+        schdist_surcharge=merged["proposal"]["schdist_surcharge"],
+        basin_surcharge=merged["proposal"]["basin_surcharge"],
+        water_surcharge=merged["proposal"]["water_surcharge"],
     )
 
     print("\n" + "=" * 60)
@@ -188,11 +208,11 @@ def main():
     optimized_partition = run_optimization(
         initial_partition,
         proposal,
-        muni_surcharge=merged["muni_surcharge"],
-        county_surcharge=merged["county_surcharge"],
-        optimization_steps=merged["optim_steps"],
-        split_munis_tolerance=merged["max_muni_splits"],
-        split_counties_tolerance=merged["max_county_splits"],
+        muni_surcharge=merged["proposal"]["muni_surcharge"],
+        county_surcharge=merged["proposal"]["county_surcharge"],
+        steps=merged["optimization"]["steps"],
+        split_munis_tolerance=merged["constraints"]["max_muni_splits"],
+        split_counties_tolerance=merged["constraints"]["max_county_splits"],
     )
 
     print("\n" + "=" * 60)
@@ -242,7 +262,7 @@ def main():
         pass
 
     # Choose sampler based on tilted-run intensity (map to optimizer p=1-value)
-    tilt_intensity = max(0.0, min(1.0, float(merged["tilted_run"])) )
+    tilt_intensity = max(0.0, min(1.0, float(merged["ensemble"]["tilted_run"])) )
     if tilt_intensity <= 0.0:
         print("Using neutral sampler (tilted-run=0.0)")
         results = run_ensemble(
@@ -252,9 +272,9 @@ def main():
             filtered_elections,
             counties=counties,
             municipalities=municipalities,
-            num_steps=int(merged["steps"]),
-            visualize_every=int(merged["viz_every"]),
-            vote_share_agg=str(merged["vote_share_agg"]),
+            num_steps=int(merged["ensemble"]["num_steps"]),
+            visualize_every=int(merged["ensemble"]["visualize_every"]),
+            vote_share_agg=str(merged["election"]["vote_share_agg"]),
             save_visualization_fn=lambda part, step, res, counties, municipalities: save_visualization(part, step, res, counties, municipalities, base_dir=out_dir),
         )
     else:
@@ -267,9 +287,9 @@ def main():
             filtered_elections,
             counties=counties,
             municipalities=municipalities,
-            num_steps=int(merged["steps"]),
-            visualize_every=int(merged["viz_every"]),
-            vote_share_agg=str(merged["vote_share_agg"]),
+            num_steps=int(merged["ensemble"]["num_steps"]),
+            visualize_every=int(merged["ensemble"]["visualize_every"]),
+            vote_share_agg=str(merged["election"]["vote_share_agg"]),
             save_visualization_fn=lambda part, step, res, counties, municipalities: save_visualization(part, step, res, counties, municipalities, base_dir=out_dir),
             p=p,
         )
