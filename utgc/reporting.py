@@ -133,7 +133,7 @@ def save_visualization(partition, step, results, counties=None, municipalities=N
     plt.savefig(f"results/step_{step:05d}.png", dpi=600, bbox_inches='tight', facecolor='white')
     plt.close()
 
-def save_results(results, available_elections):
+def save_results(results, available_elections, mode=None):
     print("Saving results...")
     os.makedirs("results", exist_ok=True)
     with open("results/ensemble_results.json", "w") as f:
@@ -150,41 +150,45 @@ def save_results(results, available_elections):
             "split_munis_extra_parts": result.get("split_munis_extra_parts", 0),
         }
 
-        for metric_key in ["mean_median", "partisan_bias", "efficiency_gap", "partisan_gini"]:
-            if metric_key in result:
-                summary_row[metric_key] = result[metric_key]
+        if mode != "neutral":
+            for metric_key in ["mean_median", "partisan_bias", "efficiency_gap", "partisan_gini"]:
+                if metric_key in result:
+                    summary_row[metric_key] = result[metric_key]
 
-        for election in available_elections:
-            if "Republican_agg_share_by_district" not in result:
-                rep_total_key = f"{election}_Republican_total"
-                if rep_total_key in result:
-                    summary_row[rep_total_key] = result[rep_total_key]
-                for metric_name in ["efficiency_gap", "mean_median", "partisan_bias"]:
-                    key = f"{election}_{metric_name}"
-                    if key in result:
-                        summary_row[key] = result[key]
-                rep_wins_key = f"{election}_Republican_wins"
-                if rep_wins_key in result:
-                    summary_row[rep_wins_key] = result[rep_wins_key]
-                margin_pct_key = f"{election}_margin_pct_by_district"
-                if margin_pct_key in result and isinstance(result[margin_pct_key], list) and len(result[margin_pct_key]) > 0:
-                    valid = [x for x in result[margin_pct_key] if x is not None]
-                    if len(valid) > 0:
-                        summary_row[f"{election}_avg_margin_pct"] = float(sum(valid) / len(valid))
+        if mode != "neutral":
+            for election in available_elections:
+                if "Republican_agg_share_by_district" not in result:
+                    rep_total_key = f"{election}_Republican_total"
+                    if rep_total_key in result:
+                        summary_row[rep_total_key] = result[rep_total_key]
+                    for metric_name in ["efficiency_gap", "mean_median", "partisan_bias"]:
+                        key = f"{election}_{metric_name}"
+                        if key in result:
+                            summary_row[key] = result[key]
+                    rep_wins_key = f"{election}_Republican_wins"
+                    if rep_wins_key in result:
+                        summary_row[rep_wins_key] = result[rep_wins_key]
+                    margin_pct_key = f"{election}_margin_pct_by_district"
+                    if margin_pct_key in result and isinstance(result[margin_pct_key], list) and len(result[margin_pct_key]) > 0:
+                        valid = [x for x in result[margin_pct_key] if x is not None]
+                        if len(valid) > 0:
+                            summary_row[f"{election}_avg_margin_pct"] = float(sum(valid) / len(valid))
 
         key = "Republican_agg_share_by_district"
-        if "Republican_agg_seats" in result:
-            summary_row["Republican_agg_seats"] = int(result["Republican_agg_seats"]) if result["Republican_agg_seats"] is not None else None
+        if mode != "neutral":
+            if "Republican_agg_seats" in result:
+                summary_row["Republican_agg_seats"] = int(result["Republican_agg_seats"]) if result["Republican_agg_seats"] is not None else None
 
-        if key in result and isinstance(result[key], list) and len(result[key]) > 0:
-            for idx, share in enumerate(result[key], start=1):
-                col_name = f"Republican_agg_share_d{idx}"
-                summary_row[col_name] = None if share is None else float(share)
+        if mode != "neutral":
+            if key in result and isinstance(result[key], list) and len(result[key]) > 0:
+                for idx, share in enumerate(result[key], start=1):
+                    col_name = f"Republican_agg_share_d{idx}"
+                    summary_row[col_name] = None if share is None else float(share)
 
         summary_data.append(summary_row)
 
     summary_df = pd.DataFrame(summary_data)
-    district_cols = [c for c in summary_df.columns if c.startswith("Republican_agg_share_d")]
+    district_cols = [c for c in summary_df.columns if c.startswith("Republican_agg_share_d")] if mode != "neutral" else []
     non_district_cols = [c for c in summary_df.columns if c not in district_cols]
     summary_df = summary_df[non_district_cols + district_cols]
     summary_df.to_csv("results/ensemble_summary.csv", index=False)
@@ -196,22 +200,23 @@ def save_results(results, available_elections):
     print(f"  Counties split (avg count): {summary_df['split_counties_count'].mean():.2f}")
     print(f"  Counties extra parts (avg total): {summary_df['split_counties_extra_parts'].mean():.2f}")
 
-    if "Republican_agg_share_by_district" not in summary_df.columns:
-        for election in available_elections:
-            rep_col = f"{election}_Republican_total"
-            if rep_col in summary_df.columns:
-                print(f"  {election} - Average Republican votes: {summary_df[rep_col].mean():.0f}")
-    else:
-        if "Republican_agg_seats" in summary_df.columns:
-            print(f"  Aggregated Republican seats (avg): {summary_df['Republican_agg_seats'].mean():.2f}")
-        if "mean_median" in summary_df.columns:
-            print(f"  Mean-median: {summary_df['mean_median'].mean():.3f}")
-        if "partisan_bias" in summary_df.columns:
-            print(f"  Partisan bias: {summary_df['partisan_bias'].mean():.3f}")
-        if "efficiency_gap" in summary_df.columns:
-            print(f"  Efficiency gap: {summary_df['efficiency_gap'].mean():.3f}")
-        if "partisan_gini" in summary_df.columns:
-            print(f"  Partisan Gini: {summary_df['partisan_gini'].mean():.3f}")
+    if mode != "neutral":
+        if "Republican_agg_share_by_district" not in summary_df.columns:
+            for election in available_elections:
+                rep_col = f"{election}_Republican_total"
+                if rep_col in summary_df.columns:
+                    print(f"  {election} - Average Republican votes: {summary_df[rep_col].mean():.0f}")
+        else:
+            if "Republican_agg_seats" in summary_df.columns:
+                print(f"  Aggregated Republican seats (avg): {summary_df['Republican_agg_seats'].mean():.2f}")
+            if "mean_median" in summary_df.columns:
+                print(f"  Mean-median: {summary_df['mean_median'].mean():.3f}")
+            if "partisan_bias" in summary_df.columns:
+                print(f"  Partisan bias: {summary_df['partisan_bias'].mean():.3f}")
+            if "efficiency_gap" in summary_df.columns:
+                print(f"  Efficiency gap: {summary_df['efficiency_gap'].mean():.3f}")
+            if "partisan_gini" in summary_df.columns:
+                print(f"  Partisan Gini: {summary_df['partisan_gini'].mean():.3f}")
 
 
 def create_partisan_histogram_plots(summary_df):

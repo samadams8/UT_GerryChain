@@ -1,7 +1,14 @@
-"""Thin CLI for running Utah redistricting ensemble analysis via utgc modules."""
+"""Thin CLI for running Utah redistricting ensemble analysis via utgc modules.
+
+Transitional config behavior:
+- Prefer YAML via --config; CLI flags still accepted but deprecated when used without YAML.
+- Precedence: CLI flags > YAML values > hardcoded defaults.
+"""
 
 import argparse
 import os
+import sys
+import yaml
 
 import warnings
 import pandas as pd
@@ -34,6 +41,7 @@ from utgc.reporting import (
 def main():
     print("Starting Utah redistricting ensemble analysis...")
     parser = argparse.ArgumentParser(description="Run Utah redistricting ensemble analysis")
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML configuration file (preferred)")
     parser.add_argument("--years", type=str, default="2016,2020,2024", help="Comma-separated list of years to include, e.g., 2016,2020")
     parser.add_argument("--offices", type=str, default="PRE,GOV,ATG,AUD,TRE", help="Comma-separated list of offices to include, e.g., PRE,GOV,ATG,AUD,TRE,USS")
     parser.add_argument("--vote-share-agg", type=str, choices=["median", "mean", "none"], default="median", help="Aggregate party vote share across selected elections")
@@ -60,6 +68,84 @@ def main():
     )
     args = parser.parse_args()
 
+    # Build defaults dict to apply precedence: CLI > YAML > defaults
+    defaults = {
+        "years": "2016,2020,2024",
+        "offices": "PRE,GOV,ATG,AUD,TRE",
+        "vote_share_agg": "median",
+        "steps": 21,
+        "optim_steps": 20,
+        "max_muni_splits": None,
+        "max_county_splits": None,
+        "viz_every": 5,
+        "muni_surcharge": 9.0,
+        "county_surcharge": 3.0,
+        "highered_surcharge": 1.0,
+        "metro_surcharge": 1.0,
+        "schdist_surcharge": 0.1,
+        "water_surcharge": 0.1,
+        "basin_surcharge": 0.1,
+        "use_cut_edges": False,
+        "tilted_run": 0.5,
+    }
+
+    yaml_config = {}
+    if args.config is not None:
+        if not os.path.exists(args.config):
+            raise FileNotFoundError(f"Config file not found: {args.config}")
+        with open(args.config, "r") as f:
+            try:
+                loaded = yaml.safe_load(f) or {}
+                if not isinstance(loaded, dict):
+                    raise ValueError("YAML config must be a mapping of keys to values")
+                yaml_config = loaded
+            except Exception as e:
+                raise RuntimeError(f"Failed to load YAML config: {e}")
+    else:
+        # Deprecation warning when running without YAML
+        print("[DEPRECATION] Running without --config YAML is deprecated and will be removed in a future release. Please provide a YAML config.")
+
+    # Determine which CLI flags were explicitly provided (present in sys.argv)
+    argv = sys.argv[1:]
+    cli_present = {
+        "years": any(arg.startswith("--years") for arg in argv),
+        "offices": any(arg.startswith("--offices") for arg in argv),
+        "vote_share_agg": any(arg.startswith("--vote-share-agg") for arg in argv),
+        "steps": any(arg.startswith("--steps") for arg in argv),
+        "optim_steps": any(arg.startswith("--optim-steps") for arg in argv),
+        "max_muni_splits": any(arg.startswith("--max-muni-splits") for arg in argv),
+        "max_county_splits": any(arg.startswith("--max-county-splits") for arg in argv),
+        "viz_every": any(arg.startswith("--viz-every") for arg in argv),
+        "muni_surcharge": any(arg.startswith("--muni-surcharge") for arg in argv),
+        "county_surcharge": any(arg.startswith("--county-surcharge") for arg in argv),
+        "highered_surcharge": any(arg.startswith("--highered-surcharge") for arg in argv),
+        "metro_surcharge": any(arg.startswith("--metro-surcharge") for arg in argv),
+        "schdist_surcharge": any(arg.startswith("--schdist-surcharge") for arg in argv),
+        "water_surcharge": any(arg.startswith("--water-surcharge") for arg in argv),
+        "basin_surcharge": any(arg.startswith("--basin-surcharge") for arg in argv),
+        "use_cut_edges": "--use-cut-edges" in argv,
+        "tilted_run": any(arg.startswith("--tilted-run") for arg in argv),
+    }
+
+    # Merge values
+    merged = dict(defaults)
+    merged.update({k: v for k, v in yaml_config.items() if k in merged})
+    # Overlay CLI values only if explicitly provided
+    for key in merged.keys():
+        if key == "use_cut_edges":
+            if cli_present[key]:
+                merged[key] = bool(getattr(args, key))
+        else:
+            if cli_present.get(key, False):
+                merged[key] = getattr(args, key)
+
+    # If both YAML and flags provided, log overrides
+    if args.config is not None and any(cli_present.values()):
+        print("Using --config and CLI flags; applying precedence (flags override YAML). Overrides:")
+        for k, present in cli_present.items():
+            if present and k in yaml_config and yaml_config.get(k) != merged.get(k):
+                print(f"  {k}: YAML={yaml_config.get(k)} -> CLI={merged.get(k)}")
+
     precincts, initial_plan = load_data()
     print("Loading county boundaries...")
     counties = load_county_boundaries(precincts)
@@ -68,8 +154,8 @@ def main():
 
     available_elections = detect_election_data(precincts)
     election_columns = get_election_columns(precincts)
-    years = [int(x) for x in args.years.split(',') if x.strip().isdigit()] if args.years else None
-    offices = [x.strip() for x in args.offices.split(',') if x.strip()] if args.offices else None
+    years = [int(x) for x in str(merged["years"]).split(',') if x.strip().isdigit()] if merged.get("years") else None
+    offices = [x.strip() for x in str(merged["offices"]).split(',') if x.strip()] if merged.get("offices") else None
     filtered_elections = filter_elections(available_elections, years=years, offices=offices)
     print(f"Available elections: {filtered_elections}")
 
@@ -82,31 +168,31 @@ def main():
 
     constraints_list = create_constraints(
         initial_partition,
-        use_cut_edges=args.use_cut_edges,
-        max_muni_splits=args.max_muni_splits,
-        max_county_splits=args.max_county_splits,
+        use_cut_edges=bool(merged["use_cut_edges"]),
+        max_muni_splits=merged["max_muni_splits"],
+        max_county_splits=merged["max_county_splits"],
     )
 
     print(f"Using region surcharges:")
-    print(f"  Municipality: {args.muni_surcharge}")
-    print(f"  County: {args.county_surcharge}")
-    print(f"  Higher Ed COI: {args.highered_surcharge}")
-    print(f"  Metro/Micro COI: {args.metro_surcharge}")
-    print(f"  School District COI: {args.schdist_surcharge}")
-    print(f"  Hydrologic Basin COI: {args.basin_surcharge}")
-    print(f"  Water Planning Area COI: {args.water_surcharge}")
-    print(f"  Cut edges constraint: {'enabled' if args.use_cut_edges else 'disabled'}")
+    print(f"  Municipality: {merged['muni_surcharge']}")
+    print(f"  County: {merged['county_surcharge']}")
+    print(f"  Higher Ed COI: {merged['highered_surcharge']}")
+    print(f"  Metro/Micro COI: {merged['metro_surcharge']}")
+    print(f"  School District COI: {merged['schdist_surcharge']}")
+    print(f"  Hydrologic Basin COI: {merged['basin_surcharge']}")
+    print(f"  Water Planning Area COI: {merged['water_surcharge']}")
+    print(f"  Cut edges constraint: {'enabled' if merged['use_cut_edges'] else 'disabled'}")
 
     proposal = create_proposal(
         ideal_population,
         precincts,
-        muni_surcharge=args.muni_surcharge,
-        county_surcharge=args.county_surcharge,
-        highered_surcharge=args.highered_surcharge,
-        metro_surcharge=args.metro_surcharge,
-        schdist_surcharge=args.schdist_surcharge,
-        basin_surcharge=args.basin_surcharge,
-        water_surcharge=args.water_surcharge,
+        muni_surcharge=merged["muni_surcharge"],
+        county_surcharge=merged["county_surcharge"],
+        highered_surcharge=merged["highered_surcharge"],
+        metro_surcharge=merged["metro_surcharge"],
+        schdist_surcharge=merged["schdist_surcharge"],
+        basin_surcharge=merged["basin_surcharge"],
+        water_surcharge=merged["water_surcharge"],
     )
 
     print("\n" + "=" * 60)
@@ -115,11 +201,11 @@ def main():
     optimized_partition = run_optimization(
         initial_partition,
         proposal,
-        muni_surcharge=args.muni_surcharge,
-        county_surcharge=args.county_surcharge,
-        optimization_steps=args.optim_steps,
-        split_munis_tolerance=args.max_muni_splits,
-        split_counties_tolerance=args.max_county_splits,
+        muni_surcharge=merged["muni_surcharge"],
+        county_surcharge=merged["county_surcharge"],
+        optimization_steps=merged["optim_steps"],
+        split_munis_tolerance=merged["max_muni_splits"],
+        split_counties_tolerance=merged["max_county_splits"],
     )
 
     print("\n" + "=" * 60)
@@ -156,7 +242,7 @@ def main():
         active_constraints = filtered_constraints
 
     # Choose sampler based on tilted-run intensity (map to optimizer p=1-value)
-    tilt_intensity = max(0.0, min(1.0, args.tilted_run))
+    tilt_intensity = max(0.0, min(1.0, float(merged["tilted_run"])) )
     if tilt_intensity <= 0.0:
         print("Using neutral sampler (tilted-run=0.0)")
         results = run_ensemble(
@@ -166,9 +252,9 @@ def main():
             filtered_elections,
             counties=counties,
             municipalities=municipalities,
-            num_steps=args.steps,
-            visualize_every=args.viz_every,
-            vote_share_agg=args.vote_share_agg,
+            num_steps=int(merged["steps"]),
+            visualize_every=int(merged["viz_every"]),
+            vote_share_agg=str(merged["vote_share_agg"]),
             save_visualization_fn=save_visualization,
         )
     else:
@@ -181,14 +267,16 @@ def main():
             filtered_elections,
             counties=counties,
             municipalities=municipalities,
-            num_steps=args.steps,
-            visualize_every=args.viz_every,
-            vote_share_agg=args.vote_share_agg,
+            num_steps=int(merged["steps"]),
+            visualize_every=int(merged["viz_every"]),
+            vote_share_agg=str(merged["vote_share_agg"]),
             save_visualization_fn=save_visualization,
             p=p,
         )
 
-    save_results(results, filtered_elections)
+    # Neutral mode output when there are no elections
+    neutral_mode = len(filtered_elections) == 0
+    save_results(results, filtered_elections, mode=("neutral" if neutral_mode else None))
     print("Ensemble analysis complete!")
     summary_df = pd.read_csv("results/ensemble_summary.csv")
     create_summary_plots(summary_df)
