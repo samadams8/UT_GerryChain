@@ -23,7 +23,7 @@ from utgc.build import (
     create_proposal,
 )
 from utgc.optimization import run_optimization
-from utgc.ensemble import run_ensemble
+from utgc.ensemble import run_ensemble, run_ensemble_tilted
 from utgc.reporting import (
     save_visualization,
     save_results,
@@ -50,8 +50,14 @@ def main():
     parser.add_argument("--schdist-surcharge", type=float, default=0.1, help="School district COI surcharge (0 to disable)")
     parser.add_argument("--water-surcharge", type=float, default=0.1, help="Water planning area surcharge (0 to disable)")
     parser.add_argument("--basin-surcharge", type=float, default=0.1, help="Hydrologic basin surcharge (0 to disable)")
-    # Compactness argument
+    # Compactness argument and tilted-run control
     parser.add_argument("--use-cut-edges", action="store_true", help="Enable compactness constraint via cut edges minimization")
+    parser.add_argument(
+        "--tilted-run",
+        type=float,
+        default=0.5,
+        help="Tilt intensity in [0,1]: 0=neutral sampler, 1=maximally tilted (optimizer p=1-value)",
+    )
     args = parser.parse_args()
 
     precincts, initial_plan = load_data()
@@ -149,18 +155,38 @@ def main():
         ensemble_start_partition = initial_partition
         active_constraints = filtered_constraints
 
-    results = run_ensemble(
-        ensemble_start_partition,
-        proposal,
-        active_constraints,
-        filtered_elections,
-        counties=counties,
-        municipalities=municipalities,
-        num_steps=args.steps,
-        visualize_every=args.viz_every,
-        vote_share_agg=args.vote_share_agg,
-        save_visualization_fn=save_visualization,
-    )
+    # Choose sampler based on tilted-run intensity (map to optimizer p=1-value)
+    tilt_intensity = max(0.0, min(1.0, args.tilted_run))
+    if tilt_intensity <= 0.0:
+        print("Using neutral sampler (tilted-run=0.0)")
+        results = run_ensemble(
+            ensemble_start_partition,
+            proposal,
+            active_constraints,
+            filtered_elections,
+            counties=counties,
+            municipalities=municipalities,
+            num_steps=args.steps,
+            visualize_every=args.viz_every,
+            vote_share_agg=args.vote_share_agg,
+            save_visualization_fn=save_visualization,
+        )
+    else:
+        p = 1.0 - tilt_intensity
+        print(f"Using tilted-run sampler with intensity={tilt_intensity} (optimizer p={p})")
+        results = run_ensemble_tilted(
+            ensemble_start_partition,
+            proposal,
+            active_constraints,
+            filtered_elections,
+            counties=counties,
+            municipalities=municipalities,
+            num_steps=args.steps,
+            visualize_every=args.viz_every,
+            vote_share_agg=args.vote_share_agg,
+            save_visualization_fn=save_visualization,
+            p=p,
+        )
 
     save_results(results, filtered_elections)
     print("Ensemble analysis complete!")
