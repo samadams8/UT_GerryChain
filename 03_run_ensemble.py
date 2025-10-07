@@ -38,7 +38,7 @@ def main():
     parser.add_argument("--offices", type=str, default="PRE,GOV,ATG,AUD,TRE", help="Comma-separated list of offices to include, e.g., PRE,GOV,ATG,AUD,TRE,USS")
     parser.add_argument("--vote-share-agg", type=str, choices=["median", "mean", "none"], default="median", help="Aggregate party vote share across selected elections")
     parser.add_argument("--steps", type=int, default=21, help="Number of ensemble steps to run")
-    parser.add_argument("--optimization-steps", type=int, default=20, help="Number of optimization steps to run before ensemble")
+    parser.add_argument("--optim-steps", type=int, default=20, help="Number of optimization steps to run before ensemble")
     parser.add_argument("--max-muni-splits", type=int, default=None, help="Maximum number of municipality splits allowed (None for no constraint)")
     parser.add_argument("--max-county-splits", type=int, default=None, help="Maximum number of county splits allowed (None for no constraint)")
     parser.add_argument("--viz-every", type=int, default=5, help="Save visualization every N steps")
@@ -46,7 +46,7 @@ def main():
     parser.add_argument("--muni-surcharge", type=float, default=9, help="Municipality region surcharge (0 to disable)")
     parser.add_argument("--county-surcharge", type=float, default=3, help="County region surcharge (0 to disable)")
     parser.add_argument("--highered-surcharge", type=float, default=1, help="Higher education COI surcharge (0 to disable)")
-    parser.add_argument("--metro-surcharge", type=float, default=0.1, help="Metro/micro statistical area COI surcharge (0 to disable)")
+    parser.add_argument("--metro-surcharge", type=float, default=1, help="Metro/micro statistical area COI surcharge (0 to disable)")
     parser.add_argument("--schdist-surcharge", type=float, default=0.1, help="School district COI surcharge (0 to disable)")
     parser.add_argument("--water-surcharge", type=float, default=0.1, help="Water planning area surcharge (0 to disable)")
     parser.add_argument("--basin-surcharge", type=float, default=0.1, help="Hydrologic basin surcharge (0 to disable)")
@@ -111,7 +111,7 @@ def main():
         proposal,
         muni_surcharge=args.muni_surcharge,
         county_surcharge=args.county_surcharge,
-        optimization_steps=args.optimization_steps,
+        optimization_steps=args.optim_steps,
         split_munis_tolerance=args.max_muni_splits,
         split_counties_tolerance=args.max_county_splits,
     )

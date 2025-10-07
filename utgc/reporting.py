@@ -7,20 +7,131 @@ import seaborn as sns
 
 def save_visualization(partition, step, results, counties=None, municipalities=None):
     os.makedirs("results", exist_ok=True)
-    fig, ax = plt.subplots(figsize=(12, 8))
-    partition.plot(ax=ax, cmap='tab20c')
+
+    def _find_wasatch_front_bounds(counties_gdf):
+        """Return padded, custom bounds for a Wasatch Front zoom.
+
+        Rules requested:
+        - Show the combined extent of Weber, Davis, Salt Lake, and Utah counties
+          (both east-west and north-south bounds from the union of these)
+
+        Returns None if bounds cannot be determined.
+        """
+        if counties_gdf is None or len(counties_gdf) == 0:
+            return None
+
+        target_names = {"WEBER", "DAVIS", "SALT LAKE", "UTAH"}
+        candidate_cols = [
+            "NAME",
+            "County",
+            "COUNTY",
+            "COUNTYNAME",
+            "COUNTY_NA",
+            "COUNTYNAM",
+            "CNTY_NAME",
+        ]
+        name_col = None
+        for col in candidate_cols:
+            if col in counties_gdf.columns:
+                name_col = col
+                break
+
+        if name_col is None:
+            # Try any object dtype column by heuristic
+            for col in counties_gdf.columns:
+                try:
+                    if counties_gdf[col].dtype == object:
+                        upper_vals = counties_gdf[col].astype(str).str.upper()
+                        if upper_vals.isin(target_names).any():
+                            name_col = col
+                            break
+                except Exception:
+                    continue
+
+        if name_col is None:
+            return None
+
+        try:
+            upper_names = counties_gdf[name_col].astype(str).str.upper()
+            # Extract individual counties
+            def _geom_of(county_upper_name):
+                m = upper_names == county_upper_name
+                g = counties_gdf[m]
+                if len(g) == 0:
+                    return None
+                try:
+                    # GeoPandas >= 0.14 preferred API
+                    return g.geometry.union_all()
+                except Exception:
+                    # Fallback for older GeoPandas
+                    return g.unary_union
+
+            geom_weber = _geom_of("WEBER")
+            geom_davis = _geom_of("DAVIS")
+            geom_salt_lake = _geom_of("SALT LAKE")
+            geom_utah = _geom_of("UTAH")
+            # Require at least Weber, Davis, Salt Lake to proceed
+            required_geoms = [geom_weber, geom_davis, geom_salt_lake]
+            if any(g is None for g in required_geoms):
+                return None
+
+            # Core union (Weber, Davis, Salt Lake, Utah if available)
+            from shapely.ops import unary_union
+            core_geoms = [g for g in [geom_weber, geom_davis, geom_salt_lake, geom_utah] if g is not None]
+            core_union = unary_union(core_geoms)
+            c_minx, c_miny, c_maxx, c_maxy = core_union.bounds
+
+            # East-West and North-South bounds: use core union of the four counties
+            minx = c_minx
+            maxx = c_maxx
+            miny = c_miny
+            maxy = c_maxy
+
+            # Ensure minx < maxx; if inverted due to data quirks, fallback to core bbox
+            if not (minx < maxx):
+                minx, maxx = c_minx, c_maxx
+
+            # Apply modest padding
+            pad_x = (maxx - minx) * 0.05
+            pad_y = (maxy - miny) * 0.05
+            return (minx - pad_x, maxx + pad_x, miny - pad_y, maxy + pad_y)
+        except Exception:
+            return None
+
+    # Prepare figure with two panels: full map (left) and Wasatch Front zoom (right)
+    fig, (ax_full, ax_zoom) = plt.subplots(1, 2, figsize=(12, 8))
+
+    # Left: full map
+    partition.plot(ax=ax_full, cmap='tab20c')
     if municipalities is not None:
-        municipalities.boundary.plot(ax=ax, color='black', linewidth=0.25, alpha=0.5)
+        municipalities.boundary.plot(ax=ax_full, color='black', linewidth=0.25, alpha=0.5)
     if counties is not None:
-        counties.boundary.plot(ax=ax, color='black', linewidth=1, alpha=0.5)
+        counties.boundary.plot(ax=ax_full, color='black', linewidth=1, alpha=0.5)
     title = f"Step {step}: Muni Splits: {results.get('split_munis_count', 0)}, County Splits: {results.get('split_counties_count', 0)}"
-    ax.set_title(title, fontsize=12, fontweight='bold')
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_aspect('equal')
+    ax_full.set_title(title, fontsize=12, fontweight='bold')
+    ax_full.set_xticks([])
+    ax_full.set_yticks([])
+    ax_full.set_aspect('equal')
+
+    # Right: Wasatch Front zoom (fallback to full extent if bounds unresolved)
+    partition.plot(ax=ax_zoom, cmap='tab20c')
+    if municipalities is not None:
+        municipalities.boundary.plot(ax=ax_zoom, color='black', linewidth=0.25, alpha=0.5)
+    if counties is not None:
+        counties.boundary.plot(ax=ax_zoom, color='black', linewidth=1, alpha=0.5)
+
+    wf_bounds = _find_wasatch_front_bounds(counties)
+    if wf_bounds is not None:
+        minx, maxx, miny, maxy = wf_bounds
+        ax_zoom.set_xlim(minx, maxx)
+        ax_zoom.set_ylim(miny, maxy)
+    ax_zoom.set_xticks([])
+    ax_zoom.set_yticks([])
+    ax_zoom.set_aspect('equal')
+
+    plt.tight_layout()
     plt.savefig(f"results/step_{step:05d}.png", dpi=600, bbox_inches='tight', facecolor='white')
     plt.close()
-
 
 def save_results(results, available_elections):
     print("Saving results...")
