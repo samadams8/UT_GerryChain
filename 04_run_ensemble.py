@@ -41,31 +41,7 @@ from utgc.reporting import (
 def main():
     print("Starting Utah redistricting ensemble analysis...")
     parser = argparse.ArgumentParser(description="Run Utah redistricting ensemble analysis")
-    parser.add_argument("--config", type=str, default=None, help="Path to YAML configuration file (preferred)")
-    parser.add_argument("--years", type=str, default="2016,2020,2024", help="Comma-separated list of years to include, e.g., 2016,2020")
-    parser.add_argument("--offices", type=str, default="PRE,GOV,ATG,AUD,TRE", help="Comma-separated list of offices to include, e.g., PRE,GOV,ATG,AUD,TRE,USS")
-    parser.add_argument("--vote-share-agg", type=str, choices=["median", "mean", "none"], default="median", help="Aggregate party vote share across selected elections")
-    parser.add_argument("--steps", type=int, default=21, help="Number of ensemble steps to run")
-    parser.add_argument("--optim-steps", type=int, default=20, help="Number of optimization steps to run before ensemble")
-    parser.add_argument("--max-muni-splits", type=int, default=None, help="Maximum number of municipality splits allowed (None for no constraint)")
-    parser.add_argument("--max-county-splits", type=int, default=None, help="Maximum number of county splits allowed (None for no constraint)")
-    parser.add_argument("--viz-every", type=int, default=5, help="Save visualization every N steps")
-    # Region surcharge arguments
-    parser.add_argument("--muni-surcharge", type=float, default=9, help="Municipality region surcharge (0 to disable)")
-    parser.add_argument("--county-surcharge", type=float, default=3, help="County region surcharge (0 to disable)")
-    parser.add_argument("--highered-surcharge", type=float, default=1, help="Higher education COI surcharge (0 to disable)")
-    parser.add_argument("--metro-surcharge", type=float, default=1, help="Metro/micro statistical area COI surcharge (0 to disable)")
-    parser.add_argument("--schdist-surcharge", type=float, default=0.1, help="School district COI surcharge (0 to disable)")
-    parser.add_argument("--water-surcharge", type=float, default=0.1, help="Water planning area surcharge (0 to disable)")
-    parser.add_argument("--basin-surcharge", type=float, default=0.1, help="Hydrologic basin surcharge (0 to disable)")
-    # Compactness argument and tilted-run control
-    parser.add_argument("--use-cut-edges", action="store_true", help="Enable compactness constraint via cut edges minimization")
-    parser.add_argument(
-        "--tilted-run",
-        type=float,
-        default=0.5,
-        help="Tilt intensity in [0,1]: 0=neutral sampler, 1=maximally tilted (optimizer p=1-value)",
-    )
+    parser.add_argument("--config", type=str, default=None, help="Path to YAML configuration file. If omitted, uses the latest in results/configurations/")
     args = parser.parse_args()
 
     # Build defaults dict to apply precedence: CLI > YAML > defaults
@@ -90,10 +66,37 @@ def main():
     }
 
     yaml_config = {}
-    if args.config is not None:
-        if not os.path.exists(args.config):
-            raise FileNotFoundError(f"Config file not found: {args.config}")
-        with open(args.config, "r") as f:
+    # Resolve config file path (use most recent config if not provided)
+    def _latest_config():
+        configs_dir = os.path.join("results", "configurations")
+        if not os.path.isdir(configs_dir):
+            return None
+        candidates = []
+        for root, _, files in os.walk(configs_dir):
+            for name in files:
+                if name.endswith(".yaml") or name.endswith(".yml"):
+                    path = os.path.join(root, name)
+                    try:
+                        mtime = os.path.getmtime(path)
+                    except Exception:
+                        mtime = 0
+                    candidates.append((mtime, path))
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+
+    config_path = args.config or _latest_config()
+
+    if config_path is not None:
+        if not os.path.exists(config_path):
+            if args.config is None:
+                raise FileNotFoundError("No configuration files found under results/configurations/.")
+            else:
+                raise FileNotFoundError(f"Config file not found: {args.config}")
+        if args.config is None:
+            print(f"Using latest configuration: {config_path}")
+        with open(config_path, "r") as f:
             try:
                 loaded = yaml.safe_load(f) or {}
                 if not isinstance(loaded, dict):
@@ -105,46 +108,30 @@ def main():
         # Deprecation warning when running without YAML
         print("[DEPRECATION] Running without --config YAML is deprecated and will be removed in a future release. Please provide a YAML config.")
 
-    # Determine which CLI flags were explicitly provided (present in sys.argv)
-    argv = sys.argv[1:]
-    cli_present = {
-        "years": any(arg.startswith("--years") for arg in argv),
-        "offices": any(arg.startswith("--offices") for arg in argv),
-        "vote_share_agg": any(arg.startswith("--vote-share-agg") for arg in argv),
-        "steps": any(arg.startswith("--steps") for arg in argv),
-        "optim_steps": any(arg.startswith("--optim-steps") for arg in argv),
-        "max_muni_splits": any(arg.startswith("--max-muni-splits") for arg in argv),
-        "max_county_splits": any(arg.startswith("--max-county-splits") for arg in argv),
-        "viz_every": any(arg.startswith("--viz-every") for arg in argv),
-        "muni_surcharge": any(arg.startswith("--muni-surcharge") for arg in argv),
-        "county_surcharge": any(arg.startswith("--county-surcharge") for arg in argv),
-        "highered_surcharge": any(arg.startswith("--highered-surcharge") for arg in argv),
-        "metro_surcharge": any(arg.startswith("--metro-surcharge") for arg in argv),
-        "schdist_surcharge": any(arg.startswith("--schdist-surcharge") for arg in argv),
-        "water_surcharge": any(arg.startswith("--water-surcharge") for arg in argv),
-        "basin_surcharge": any(arg.startswith("--basin-surcharge") for arg in argv),
-        "use_cut_edges": "--use-cut-edges" in argv,
-        "tilted_run": any(arg.startswith("--tilted-run") for arg in argv),
-    }
-
-    # Merge values
+    # Merge values strictly from YAML (no CLI overrides)
     merged = dict(defaults)
     merged.update({k: v for k, v in yaml_config.items() if k in merged})
-    # Overlay CLI values only if explicitly provided
-    for key in merged.keys():
-        if key == "use_cut_edges":
-            if cli_present[key]:
-                merged[key] = bool(getattr(args, key))
-        else:
-            if cli_present.get(key, False):
-                merged[key] = getattr(args, key)
 
-    # If both YAML and flags provided, log overrides
-    if args.config is not None and any(cli_present.values()):
-        print("Using --config and CLI flags; applying precedence (flags override YAML). Overrides:")
-        for k, present in cli_present.items():
-            if present and k in yaml_config and yaml_config.get(k) != merged.get(k):
-                print(f"  {k}: YAML={yaml_config.get(k)} -> CLI={merged.get(k)}")
+    # Determine output directory for this run, matching config tag/name BEFORE running samplers
+    # Prefer the name of the params directory to match the source config
+    run_tag = None
+    try:
+        params_dir = os.path.dirname(config_path) if config_path else None
+        if params_dir:
+            run_tag = os.path.basename(params_dir)
+    except Exception:
+        run_tag = None
+    if not run_tag:
+        if isinstance(yaml_config.get("tag"), str) and yaml_config["tag"].strip():
+            run_tag = yaml_config["tag"].strip()
+        else:
+            try:
+                base = os.path.splitext(os.path.basename(config_path or ""))[0]
+                run_tag = base or "run"
+            except Exception:
+                run_tag = "run"
+    out_dir = os.path.join("results", "ensembles", run_tag)
+    os.makedirs(out_dir, exist_ok=True)
 
     precincts, initial_plan = load_data()
     print("Loading county boundaries...")
@@ -241,6 +228,19 @@ def main():
         ensemble_start_partition = initial_partition
         active_constraints = filtered_constraints
 
+    # Before running the sampler, persist the exact configuration used (defaults merged with YAML)
+    try:
+        params_out_path = os.path.join(out_dir, "params.yaml")
+        effective = {k: merged.get(k) for k in merged.keys()}
+        # Also persist the resolved years/offices strings for clarity
+        effective["years"] = merged.get("years")
+        effective["offices"] = merged.get("offices")
+        with open(params_out_path, "w") as f:
+            yaml.safe_dump(effective, f, sort_keys=True)
+        print(f"Saved run parameters to: {params_out_path}")
+    except Exception:
+        pass
+
     # Choose sampler based on tilted-run intensity (map to optimizer p=1-value)
     tilt_intensity = max(0.0, min(1.0, float(merged["tilted_run"])) )
     if tilt_intensity <= 0.0:
@@ -255,7 +255,7 @@ def main():
             num_steps=int(merged["steps"]),
             visualize_every=int(merged["viz_every"]),
             vote_share_agg=str(merged["vote_share_agg"]),
-            save_visualization_fn=save_visualization,
+            save_visualization_fn=lambda part, step, res, counties, municipalities: save_visualization(part, step, res, counties, municipalities, base_dir=out_dir),
         )
     else:
         p = 1.0 - tilt_intensity
@@ -270,16 +270,16 @@ def main():
             num_steps=int(merged["steps"]),
             visualize_every=int(merged["viz_every"]),
             vote_share_agg=str(merged["vote_share_agg"]),
-            save_visualization_fn=save_visualization,
+            save_visualization_fn=lambda part, step, res, counties, municipalities: save_visualization(part, step, res, counties, municipalities, base_dir=out_dir),
             p=p,
         )
 
     # Neutral mode output when there are no elections
     neutral_mode = len(filtered_elections) == 0
-    save_results(results, filtered_elections, mode=("neutral" if neutral_mode else None))
+    save_results(results, filtered_elections, mode=("neutral" if neutral_mode else None), out_dir=out_dir)
     print("Ensemble analysis complete!")
-    summary_df = pd.read_csv("results/ensemble_summary.csv")
-    create_summary_plots(summary_df)
+    summary_df = pd.read_csv(os.path.join(out_dir, "ensemble_summary.csv"))
+    create_summary_plots(summary_df, out_dir=out_dir)
 
 if __name__ == "__main__":
     main()

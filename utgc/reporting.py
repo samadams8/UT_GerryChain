@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 
-def save_visualization(partition, step, results, counties=None, municipalities=None):
-    os.makedirs("results", exist_ok=True)
+def save_visualization(partition, step, results, counties=None, municipalities=None, base_dir="results"):
+    os.makedirs(base_dir, exist_ok=True)
 
     def _find_wasatch_front_bounds(counties_gdf):
         """Return padded, custom bounds for a Wasatch Front zoom.
@@ -130,13 +130,13 @@ def save_visualization(partition, step, results, counties=None, municipalities=N
     ax_zoom.set_aspect('equal')
 
     plt.tight_layout()
-    plt.savefig(f"results/step_{step:05d}.png", dpi=600, bbox_inches='tight', facecolor='white')
+    plt.savefig(os.path.join(base_dir, f"step_{step:05d}.png"), dpi=600, bbox_inches='tight', facecolor='white')
     plt.close()
 
-def save_results(results, available_elections, mode=None):
+def save_results(results, available_elections, mode=None, out_dir="results"):
     print("Saving results...")
-    os.makedirs("results", exist_ok=True)
-    with open("results/ensemble_results.json", "w") as f:
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "ensemble_results.json"), "w") as f:
         json.dump(results, f, indent=2)
 
     summary_data = []
@@ -191,7 +191,7 @@ def save_results(results, available_elections, mode=None):
     district_cols = [c for c in summary_df.columns if c.startswith("Republican_agg_share_d")] if mode != "neutral" else []
     non_district_cols = [c for c in summary_df.columns if c not in district_cols]
     summary_df = summary_df[non_district_cols + district_cols]
-    summary_df.to_csv("results/ensemble_summary.csv", index=False)
+    summary_df.to_csv(os.path.join(out_dir, "ensemble_summary.csv"), index=False)
 
     print(f"Results saved to results/ directory")
     print(f"Summary statistics:")
@@ -219,7 +219,7 @@ def save_results(results, available_elections, mode=None):
                 print(f"  Partisan Gini: {summary_df['partisan_gini'].mean():.3f}")
 
 
-def create_partisan_histogram_plots(summary_df):
+def create_partisan_histogram_plots(summary_df, out_dir="results"):
     metrics = {
         'mean_median': 'Mean-Median Difference',
         'partisan_bias': 'Partisan Bias',
@@ -260,11 +260,12 @@ def create_partisan_histogram_plots(summary_df):
                 ax.text(0.5, 0.5, f'No data for {title}', ha='center', va='center', transform=ax.transAxes)
                 ax.set_title(f'Distribution of {title}', fontsize=12, fontweight='bold')
     plt.tight_layout()
-    plt.savefig('results/ensemble_partisan_histograms.png', dpi=300, bbox_inches='tight')
+    os.makedirs(out_dir, exist_ok=True)
+    plt.savefig(os.path.join(out_dir, 'ensemble_partisan_histograms.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
 
-def create_split_histogram_plots(summary_df):
+def create_split_histogram_plots(summary_df, out_dir="results"):
     metrics = {
         'split_munis_count': 'Municipality Splits',
         'split_munis_extra_parts': 'Municipality Extra Parts',
@@ -298,11 +299,12 @@ def create_split_histogram_plots(summary_df):
                 ax.text(0.5, 0.5, f'No data for {title}', ha='center', va='center', transform=ax.transAxes)
                 ax.set_title(f'Distribution of {title}', fontsize=12, fontweight='bold')
     plt.tight_layout()
-    plt.savefig('results/ensemble_split_histograms.png', dpi=300, bbox_inches='tight')
+    os.makedirs(out_dir, exist_ok=True)
+    plt.savefig(os.path.join(out_dir, 'ensemble_split_histograms.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
 
-def create_shares_and_seats_plots(summary_df):
+def create_shares_and_seats_plots(summary_df, out_dir="results"):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
     share_cols = [col for col in summary_df.columns if col.startswith('Republican_agg_share_d')]
     if share_cols:
@@ -373,16 +375,17 @@ def create_shares_and_seats_plots(summary_df):
         ax2.set_title('Distribution of Republican Seats', fontsize=12, fontweight='bold')
 
     plt.tight_layout()
-    plt.savefig('results/ensemble_shares_and_seats.png', dpi=300, bbox_inches='tight')
+    os.makedirs(out_dir, exist_ok=True)
+    plt.savefig(os.path.join(out_dir, 'ensemble_shares_and_seats.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
 
-def create_summary_plots(summary_df):
+def create_summary_plots(summary_df, out_dir="results"):
     print("Creating ensemble summary plots...")
     plt.style.use('default')
     sns.set_palette("Blues")
-    create_partisan_histogram_plots(summary_df)
-    create_split_histogram_plots(summary_df)
-    create_shares_and_seats_plots(summary_df)
+    create_partisan_histogram_plots(summary_df, out_dir=out_dir)
+    create_split_histogram_plots(summary_df, out_dir=out_dir)
+    create_shares_and_seats_plots(summary_df, out_dir=out_dir)
 
 
