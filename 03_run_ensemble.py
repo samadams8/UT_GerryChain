@@ -1,6 +1,9 @@
 """
 Run an ensemble of plans in accordance with Utah's redistricting requirements.
 
+This script now includes an optimization phase that runs for 20 steps (configurable) to minimize 
+population deviation and city/county splits before running the main ensemble analysis.
+
 Allow different input data to be used, but start by using the UT_precincts file
 and using the 2021 Utah Congressional District plan as the initial partition
 
@@ -14,6 +17,10 @@ Neutral redistricting standards, in priority order:
 5. preserving traditional neighborhoods and local communities of interest; [Use the COI data for higher ed, metro/micro statistical areas, and school districts and surcharges]
 6. following natural and geographic features, boundaries, and barriers; and [Aligns well with county lines in some cases; also includes hydrologic basins and water planning areas]
 7. maximizing boundary agreement among different types of districts. [No additional work]
+
+The optimization phase uses GerryChain's SingleMetricOptimizer with tilted run optimization 
+to minimize a combined objective function that includes population deviation and city/county 
+split penalties with surcharges.
 
 Command line options for region surcharges:
 --muni-surcharge: Municipality region surcharge (default: 9.0, use 0 to disable)
@@ -58,6 +65,7 @@ Per-election metrics (when aggregation disabled):
 All data saved to results/ directory. Visualizations saved as .png files with split counts labeled.
 """
 
+from math import ceil
 import os
 import sys
 import argparse
@@ -85,6 +93,7 @@ from gerrychain.metrics import (
     partisan_bias, mean_median, efficiency_gap,
     polsby_popper
 )
+from gerrychain.optimization import SingleMetricOptimizer
 from functools import partial
 from gerrychain.updaters.locality_split_scores import LocalitySplits
 
@@ -109,7 +118,7 @@ def load_data():
     print(f"Loaded {len(precincts)} precincts")
     
     # Load initial congressional plan
-    initial_plan_path = "plans/CONG/ut_cong_2021/ut_cong_2021.shp"
+    initial_plan_path = "plans/CONG/2025_UT-C/2025_UT-C.shp"
     if not os.path.exists(initial_plan_path):
         print(f"Error: {initial_plan_path} not found.")
         sys.exit(1)
@@ -164,52 +173,66 @@ def load_municipality_boundaries(precincts):
         print(f"Warning: {muni_path} not found.")
     return municipalities
 
-def count_municipality_splits(partition):
-    """Count number of municipalities split across districts."""
-    # Get municipality assignments from the graph nodes
-    muni_districts = {}
-    
-    for node in partition.graph.nodes:
-        node_data = partition.graph.nodes[node]
-        if 'MUNIID' in node_data and node_data['MUNIID']:
-            muni_id = node_data['MUNIID']
-            district = partition.assignment[node]
-            
-            if muni_id not in muni_districts:
-                muni_districts[muni_id] = set()
-            muni_districts[muni_id].add(district)
-    
-    # Count splits: number of districts each municipality appears in minus 1
-    splits = 0
-    for muni_id, districts in muni_districts.items():
-        if len(districts) > 1:
-            splits += len(districts) - 1
-    
-    return splits
+def get_num_split_munis(partition):
+    """Number of municipalities touching 2+ districts (from LocalitySplits)."""
+    try:
+        muni_ls = partition["muni_locality_splits"]
+        return int(muni_ls.get("num_split_localities", 0))
+    except Exception:
+        return 0
 
-def count_county_splits(partition):
-    """Count number of counties split across districts."""
-    # Get county assignments from the graph nodes
-    county_districts = {}
-    
-    for node in partition.graph.nodes:
-        node_data = partition.graph.nodes[node]
-        if 'COUNTYID' in node_data and node_data['COUNTYID']:
-            county_id = node_data['COUNTYID']
-            district = partition.assignment[node]
-            
-            if county_id not in county_districts:
-                county_districts[county_id] = set()
-            county_districts[county_id].add(district)
-    
-    # Count splits: number of districts each county appears in minus 1
-    splits = 0
-    for county_id, districts in county_districts.items():
-        if len(districts) > 1:
-            splits += len(districts) - 1
-    
-    return splits
+def get_num_split_counties(partition):
+    """Number of counties touching 2+ districts (from LocalitySplits)."""
+    try:
+        county_ls = partition["county_locality_splits"]
+        return int(county_ls.get("num_split_localities", 0))
+    except Exception:
+        return 0
 
+def combined_optimization_objective(
+    partition,
+    muni_surcharge=9.0,
+    muni_splits_tolerance=None,
+    county_surcharge=3.0, 
+    county_splits_tolerance=None,
+    pop_tolerance=0.001,
+    num_districts=4
+    ):
+    """Combined objective function minimizing both population deviation and splits."""
+    # Compute the total population
+    total_population = sum(partition["population"].values())
+    ideal_population = total_population / len(partition)
+
+    # Get raw metrics
+    pop_dev = population_deviation_objective(partition)
+    muni_splits = get_num_split_munis(partition)
+    county_splits = get_num_split_counties(partition)
+    
+    # Set default tolerances if not provided
+    if muni_splits_tolerance is None:
+        muni_splits_tolerance = 2 * num_districts
+    if county_splits_tolerance is None:
+        county_splits_tolerance = 2 * num_districts
+    
+    # Normalize components so that 1.0 is exactly passing threshold
+    pop_component = pop_dev / pop_tolerance
+    muni_component = muni_splits / muni_splits_tolerance
+    county_component = county_splits / county_splits_tolerance
+    
+    # Combine normalized components (all should be minimized, 1.0 = passing threshold)
+    return pop_component + muni_component + county_component
+
+def population_deviation_objective(partition):
+    """Objective function to minimize population deviation from ideal."""
+    total_population = sum(partition["population"].values())
+    ideal_population = total_population / len(partition)
+    
+    # Calculate maximum deviation from ideal
+    max_deviation = 0
+    for pop in partition["population"].values():
+        max_deviation = max(max_deviation, abs(float(pop) - ideal_population) / ideal_population)
+    
+    return max_deviation
 
 def create_updaters(elections=[], election_columns=[]):
     """Create updaters for the ensemble analysis."""
@@ -220,10 +243,6 @@ def create_updaters(elections=[], election_columns=[]):
         "cut_edges": updaters.cut_edges,
         "perimeter": updaters.perimeter,
         "area": updaters.Tally("area", alias="area"),
-        # Custom split counting methods (for comparison)
-        "muni_splits_custom": count_municipality_splits,
-        "county_splits_custom": count_county_splits,
-        # Locality split scores for counties and municipalities
         "county_locality_splits": LocalitySplits(
             name="county_locality_splits",
             col_id="COUNTYID",
@@ -258,7 +277,7 @@ def create_updaters(elections=[], election_columns=[]):
     
     return updaters_dict
 
-def create_constraints(initial_partition, use_cut_edges=False):
+def create_constraints(initial_partition, use_cut_edges=False, max_muni_splits=None, max_county_splits=None):
     """Create constraints according to Utah redistricting requirements."""
     print("Creating constraints...")
     
@@ -436,6 +455,85 @@ def create_initial_partition(graph, precincts, updaters_dict):
     )
     print(f"Initial partition created with {len(initial_partition)} districts")
     return initial_partition
+
+def run_optimization(initial_partition, proposal, muni_surcharge=9.0, county_surcharge=3.0, 
+                    popdev_tolerance=0.001, optimization_steps=20, optimization_probability=0.1,
+                    split_munis_tolerance=None, split_counties_tolerance=None, max_attempts=5):
+    """Run optimization to minimize population deviation and city/county splits using tilted run method."""
+    num_districts = len(initial_partition)
+    
+    print(f"Running optimization for {optimization_steps} steps...")
+    if split_munis_tolerance is not None and split_counties_tolerance is not None:
+        print(f"Tolerance thresholds: pop_dev={popdev_tolerance:.4f}, muni_splits={split_munis_tolerance}, county_splits={split_counties_tolerance}")
+    else:
+        print(f"Tolerance thresholds: pop_dev={popdev_tolerance:.4f}, muni_splits={'unlimited' if split_munis_tolerance is None else split_munis_tolerance}, county_splits={'unlimited' if split_counties_tolerance is None else split_counties_tolerance}")
+        
+    # Create combined objective function with normalized components
+    def objective_function(partition):
+        return combined_optimization_objective(
+            partition, 
+            muni_surcharge=muni_surcharge, 
+            county_surcharge=county_surcharge,
+            pop_tolerance=popdev_tolerance,
+            muni_splits_tolerance=split_munis_tolerance,
+            county_splits_tolerance=split_counties_tolerance,
+            num_districts=num_districts
+        )
+    
+    # Retry logic - attempt optimization up to max_attempts times if tolerance is not met
+    optimized_partition = initial_partition
+    for attempt in range(max_attempts):
+        if attempt > 0:
+            print(f"Retrying optimization (attempt {attempt + 1}/{max_attempts})...")
+        
+        # Create optimizer
+        optimizer = SingleMetricOptimizer(
+            proposal=proposal,
+            constraints=[contiguous],
+            initial_state=optimized_partition,
+            optimization_metric=objective_function,
+            maximize=False  # We want to minimize the objective
+        )
+        
+        if attempt == 0:
+            print("Starting optimization...")
+        
+        # Run tilted run optimization (accepts worse plans with fixed probability)
+        for i, partition in enumerate(optimizer.short_bursts(
+            5, ceil(optimization_steps/5), with_progress_bar=True)):
+            pass  # The optimizer automatically tracks best score and partition
+        
+        print(f"Optimized score: {optimizer.best_score}")
+
+        # Use the optimizer's built-in best partition and score
+        optimized_partition = optimizer.best_part
+        
+        # Check if the result passes tolerance tests
+        pop_dev = population_deviation_objective(optimized_partition)
+        muni_splits = get_num_split_munis(optimized_partition)
+        county_splits = get_num_split_counties(optimized_partition)
+        
+        # Check if all tolerances are met
+        pop_passes = pop_dev <= popdev_tolerance
+        muni_passes = (split_munis_tolerance is None) or (muni_splits <= split_munis_tolerance)
+        county_passes = (split_counties_tolerance is None) or (county_splits <= split_counties_tolerance)
+        
+        if pop_passes and muni_passes and county_passes:
+            if attempt > 0:
+                print(f"✓ Optimization successful on attempt {attempt + 1}! All tolerances met.")
+            else:
+                print(f"✓ Optimization successful! All tolerances met.")
+            print(f"Final population deviation: {pop_dev:.6f}")
+            print(f"Final municipality splits: {muni_splits}")
+            print(f"Final county splits: {county_splits}")
+            return optimized_partition
+        else:
+            if attempt < max_attempts - 1:  # Don't print on the last attempt
+                print(f"✗ Attempt {attempt + 1} failed tolerance tests, retrying...")
+    
+    # If we get here, all attempts failed
+    print(f"⚠️  WARNING: Optimization failed to meet tolerance requirements after {max_attempts} attempts")
+    return optimized_partition
 
 def run_ensemble(initial_partition, proposal, constraints_list, available_elections, counties=None, municipalities=None, num_steps=5000, visualize_every=10, vote_share_agg="median"):
     """Run the ensemble analysis."""
@@ -763,11 +861,11 @@ def save_results(results, available_elections):
     
     print(f"Results saved to results/ directory")
     print(f"Summary statistics:")
-    print(f"  Counties split (avg count): {summary_df['split_counties_count'].mean():.2f}")
-    print(f"  Counties extra parts (avg total): {summary_df['split_counties_extra_parts'].mean():.2f}")
     print(f"  Munis split (avg count): {summary_df['split_munis_count'].mean():.2f}")
     print(f"  Munis extra parts (avg total): {summary_df['split_munis_extra_parts'].mean():.2f}")
-    
+    print(f"  Counties split (avg count): {summary_df['split_counties_count'].mean():.2f}")
+    print(f"  Counties extra parts (avg total): {summary_df['split_counties_extra_parts'].mean():.2f}")
+
     # Print election summary (Republican-focused). Skip per-election printing if aggregation used
     if "Republican_agg_share_by_district" not in summary_df.columns:
         for election in available_elections:
@@ -1031,16 +1129,20 @@ def main():
     parser.add_argument("--offices", type=str, default="PRE,GOV,ATG,AUD,TRE", help="Comma-separated list of offices to include, e.g., PRE,GOV,ATG,AUD,TRE,USS")
     parser.add_argument("--vote-share-agg", type=str, choices=["median", "mean", "none"], default="median", help="Aggregate party vote share across selected elections")
     parser.add_argument("--steps", type=int, default=21, help="Number of ensemble steps to run")
+    parser.add_argument("--optimization-steps", type=int, default=20, help="Number of optimization steps to run before ensemble")
+    parser.add_argument("--optimization-probability", type=float, default=0.1, help="Probability of accepting worse plans during optimization (tilted run)")
+    parser.add_argument("--max-muni-splits", type=int, default=None, help="Maximum number of municipality splits allowed (None for no constraint)")
+    parser.add_argument("--max-county-splits", type=int, default=None, help="Maximum number of county splits allowed (None for no constraint)")
     parser.add_argument("--viz-every", type=int, default=5, help="Save visualization every N steps")
     
     # Region surcharge arguments
-    parser.add_argument("--muni-surcharge", type=float, default=8, help="Municipality region surcharge (0 to disable)")
-    parser.add_argument("--county-surcharge", type=float, default=4, help="County region surcharge (0 to disable)")
+    parser.add_argument("--muni-surcharge", type=float, default=9, help="Municipality region surcharge (0 to disable)")
+    parser.add_argument("--county-surcharge", type=float, default=3, help="County region surcharge (0 to disable)")
     parser.add_argument("--highered-surcharge", type=float, default=1, help="Higher education COI surcharge (0 to disable)")
-    parser.add_argument("--metro-surcharge", type=float, default=1/2, help="Metro/micro statistical area COI surcharge (0 to disable)")
-    parser.add_argument("--schdist-surcharge", type=float, default=1/2, help="School district COI surcharge (0 to disable)")
-    parser.add_argument("--water-surcharge", type=float, default=1/8, help="Water planning area surcharge (0 to disable)")
-    parser.add_argument("--basin-surcharge", type=float, default=1/8, help="Hydrologic basin surcharge (0 to disable)")
+    parser.add_argument("--metro-surcharge", type=float, default=0.1, help="Metro/micro statistical area COI surcharge (0 to disable)")
+    parser.add_argument("--schdist-surcharge", type=float, default=0.1, help="School district COI surcharge (0 to disable)")
+    parser.add_argument("--water-surcharge", type=float, default=0.1, help="Water planning area surcharge (0 to disable)")
+    parser.add_argument("--basin-surcharge", type=float, default=0.1, help="Hydrologic basin surcharge (0 to disable)")
     
     # Compactness argument
     parser.add_argument("--use-cut-edges", action="store_true", help="Enable compactness constraint via cut edges minimization")
@@ -1082,7 +1184,11 @@ def main():
     print(f"Ideal population per district: {ideal_population:,.0f}")
     
     # Create constraints
-    constraints_list = create_constraints(initial_partition, use_cut_edges=args.use_cut_edges)
+    constraints_list = create_constraints(
+        initial_partition,
+        use_cut_edges=args.use_cut_edges,
+        max_muni_splits=args.max_muni_splits,
+        max_county_splits=args.max_county_splits)
     
     # Create proposal
     print(f"Using region surcharges:")
@@ -1095,17 +1201,80 @@ def main():
     print(f"  Water Planning Area COI: {args.water_surcharge}")
     print(f"  Cut edges constraint: {'enabled' if args.use_cut_edges else 'disabled'}")
     
-    proposal = create_proposal(ideal_population, precincts, 
-                              muni_surcharge=args.muni_surcharge,
-                              county_surcharge=args.county_surcharge,
-                              highered_surcharge=args.highered_surcharge,
-                              metro_surcharge=args.metro_surcharge,
-                              schdist_surcharge=args.schdist_surcharge,
-                              basin_surcharge=args.basin_surcharge,
-                              water_surcharge=args.water_surcharge)
+    proposal = create_proposal(
+        ideal_population, precincts, 
+        muni_surcharge=args.muni_surcharge,
+        county_surcharge=args.county_surcharge,
+        highered_surcharge=args.highered_surcharge,
+        metro_surcharge=args.metro_surcharge,
+        schdist_surcharge=args.schdist_surcharge,
+        basin_surcharge=args.basin_surcharge,
+        water_surcharge=args.water_surcharge
+    )
     
-    # Run ensemble
-    results = run_ensemble(initial_partition, proposal, constraints_list, filtered_elections, counties=counties, municipalities=municipalities, num_steps=args.steps, visualize_every=args.viz_every, vote_share_agg=args.vote_share_agg)
+    # Run optimization first to get a better starting partition
+    print("\n" + "="*60)
+    print("RUNNING OPTIMIZATION PHASE")
+    print("="*60)
+    optimized_partition = run_optimization(
+        initial_partition, 
+        proposal, 
+        muni_surcharge=args.muni_surcharge,
+        county_surcharge=args.county_surcharge,
+        optimization_steps=args.optimization_steps,
+        optimization_probability=args.optimization_probability,
+        split_munis_tolerance=args.max_muni_splits,
+        split_counties_tolerance=args.max_county_splits
+    )
+    
+    print("\n" + "="*60)
+    print("RUNNING ENSEMBLE ANALYSIS")
+    print("="*60)
+    
+    # Check if optimized partition meets ensemble constraints; fall back if not
+    def partition_satisfies_all(partition, constraints_to_check):
+        for c in constraints_to_check:
+            try:
+                if not c(partition):
+                    return False
+            except Exception:
+                # If a constraint errors, treat as failing
+                return False
+        return True
+
+    if partition_satisfies_all(optimized_partition, constraints_list):
+        print("Using optimized partition as starting point for ensemble")
+        ensemble_start_partition = optimized_partition
+        active_constraints = constraints_list
+    elif partition_satisfies_all(initial_partition, constraints_list):
+        print("Warning: Optimized partition does not meet ensemble constraints, using original partition")
+        ensemble_start_partition = initial_partition
+        active_constraints = constraints_list
+    else:
+        print("Warning: Neither optimized nor initial partition meets all constraints. Filtering to satisfied subset.")
+        filtered_constraints = []
+        for c in constraints_list:
+            try:
+                if c(initial_partition):
+                    filtered_constraints.append(c)
+            except Exception:
+                # Drop constraints that error
+                pass
+        ensemble_start_partition = initial_partition
+        active_constraints = filtered_constraints
+
+    # Run ensemble using the appropriate starting partition
+    results = run_ensemble(
+        ensemble_start_partition,
+        proposal,
+        active_constraints,
+        filtered_elections,
+        counties=counties,
+        municipalities=municipalities,
+        num_steps=args.steps,
+        visualize_every=args.viz_every,
+        vote_share_agg=args.vote_share_agg,
+    )
     
     # Save results
     save_results(results, filtered_elections)
