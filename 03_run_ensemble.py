@@ -140,6 +140,20 @@ def load_county_boundaries(precincts):
         print(f"Warning: {county_path} not found.")
     return counties
 
+def load_municipality_boundaries(precincts):
+    """Load municipality boundaries for visualization overlay."""
+    muni_path = "data/cois/UtahMunicipalBoundaries/Municipalities.shp"
+    municipalities = None
+    if os.path.exists(muni_path):
+        print(f"Loading municipality boundaries from {muni_path}...")
+        municipalities = gpd.read_file(muni_path)
+        # Transform to same CRS as precincts
+        municipalities = municipalities.to_crs(precincts.crs)
+        print(f"Loaded {len(municipalities)} municipalities")
+    else:
+        print(f"Warning: {muni_path} not found.")
+    return municipalities
+
 def count_municipality_splits(partition):
     """Count number of municipalities split across districts."""
     # Get municipality assignments from the graph nodes
@@ -387,7 +401,7 @@ def create_initial_partition(graph, precincts, updaters_dict):
     print(f"Initial partition created with {len(initial_partition)} districts")
     return initial_partition
 
-def run_ensemble(initial_partition, proposal, constraints_list, available_elections, counties=None, num_steps=5000, visualize_every=10, vote_share_agg="median"):
+def run_ensemble(initial_partition, proposal, constraints_list, available_elections, counties=None, municipalities=None, num_steps=5000, visualize_every=10, vote_share_agg="median"):
     """Run the ensemble analysis."""
     print(f"Running ensemble analysis with {num_steps} steps...")
     
@@ -603,11 +617,11 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
         
         # Save visualization every N steps
         if i % visualize_every == 0:
-            save_visualization(partition, i, step_results, counties)
+            save_visualization(partition, i, step_results, counties, municipalities)
     
     return results
 
-def save_visualization(partition, step, results, counties=None):
+def save_visualization(partition, step, results, counties=None, municipalities=None):
     """Save visualization of the partition."""
     
     # Create results directory
@@ -617,7 +631,11 @@ def save_visualization(partition, step, results, counties=None):
     fig, ax = plt.subplots(figsize=(12, 8))
     
     # Plot partition
-    partition.plot(ax=ax, cmap='tab20c', edgecolor='white', linewidth=0.5)
+    partition.plot(ax=ax, cmap='tab20c')
+    
+    # Add municipality boundaries if available (plot first so they appear under county boundaries)
+    if municipalities is not None:
+        municipalities.boundary.plot(ax=ax, color='white', linewidth=0.5, alpha=0.5)
     
     # Add county boundaries if available
     if counties is not None:
@@ -747,7 +765,7 @@ def create_partisan_histogram_plots(summary_df):
     # Create 2x2 subplots
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     axes = axes.flatten()
-    
+
     for i, (col, title) in enumerate(metrics.items()):
         if col in summary_df.columns:
             ax = axes[i]
@@ -756,12 +774,16 @@ def create_partisan_histogram_plots(summary_df):
             if len(data) > 0:
                 # Special handling for partisan_bias (discrete values)
                 if col == 'partisan_bias':
+                    # Count number of districts
+                    share_cols = [col for col in summary_df.columns if col.startswith('Republican_agg_share_d')]
+                    num_districts = len(share_cols)
+
                     # Get unique values and sort them
                     unique_vals = sorted(data.unique())
                     # Create bins shifted by half their width
                     bin_edges = []
                     for val in unique_vals:
-                        bin_edges.extend([val - 0.25, val + 0.25])
+                        bin_edges.extend([val - 1/(num_districts*2), val + 1/(num_districts*2)])
                     # Remove duplicates and sort
                     bin_edges = sorted(list(set(bin_edges)))
                     ax.hist(data, bins=bin_edges, alpha=0.7, color='#6B7280', edgecolor='white', linewidth=0.8)
@@ -972,7 +994,7 @@ def main():
     parser.add_argument("--years", type=str, default="2016,2020,2024", help="Comma-separated list of years to include, e.g., 2016,2020")
     parser.add_argument("--offices", type=str, default="PRE,GOV,ATG,AUD,TRE", help="Comma-separated list of offices to include, e.g., PRE,GOV,ATG,AUD,TRE,USS")
     parser.add_argument("--vote-share-agg", type=str, choices=["median", "mean", "none"], default="median", help="Aggregate party vote share across selected elections")
-    parser.add_argument("--steps", type=int, default=20, help="Number of ensemble steps to run")
+    parser.add_argument("--steps", type=int, default=21, help="Number of ensemble steps to run")
     parser.add_argument("--viz-every", type=int, default=5, help="Save visualization every N steps")
     args = parser.parse_args()
 
@@ -983,6 +1005,10 @@ def main():
     print("Loading county boundaries...")
     counties = load_county_boundaries(precincts)
     
+    # Load municipality boundaries for visualization
+    print("Loading municipality boundaries...")
+    municipalities = load_municipality_boundaries(precincts)
+    
     # Detect available election data
     available_elections = detect_election_data(precincts)
     election_columns = get_election_columns(precincts)
@@ -991,7 +1017,6 @@ def main():
     offices = [x.strip() for x in args.offices.split(',') if x.strip()] if args.offices else None
     filtered_elections = filter_elections(available_elections, years=years, offices=offices)
     print(f"Available elections: {filtered_elections}")
-    print(f"Found {len(election_columns)} election columns")
 
     print("Initializing MCMC...")
     # Create graph
@@ -1014,7 +1039,7 @@ def main():
     proposal = create_proposal(ideal_population, precincts)
     
     # Run ensemble
-    results = run_ensemble(initial_partition, proposal, constraints_list, filtered_elections, counties=counties, num_steps=args.steps, visualize_every=args.viz_every, vote_share_agg=args.vote_share_agg)
+    results = run_ensemble(initial_partition, proposal, constraints_list, filtered_elections, counties=counties, municipalities=municipalities, num_steps=args.steps, visualize_every=args.viz_every, vote_share_agg=args.vote_share_agg)
     
     # Save results
     save_results(results, filtered_elections)
