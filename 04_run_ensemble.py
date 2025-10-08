@@ -29,7 +29,7 @@ from utgc.build import (
     create_constraints,
     create_proposal,
 )
-from utgc.optimization import run_optimization
+from utgc.preconditioning import run_preconditioning
 from utgc.ensemble import run_ensemble, run_ensemble_tilted
 from utgc.reporting import (
     save_visualization,
@@ -60,7 +60,7 @@ def main():
             "water_surcharge": 0.1,
             "basin_surcharge": 0.1,
         },
-        "optimization": {
+        "preconditioning": {
             "enable": True,
             "steps": 20,
         },
@@ -203,14 +203,14 @@ def main():
     )
 
     print("\n" + "=" * 60)
-    print("RUNNING OPTIMIZATION PHASE")
+    print("RUNNING PRECONDITIONING PHASE")
     print("=" * 60)
-    optimized_partition = run_optimization(
+    optimized_partition = run_preconditioning(
         initial_partition,
         proposal,
         muni_surcharge=merged["proposal"]["muni_surcharge"],
         county_surcharge=merged["proposal"]["county_surcharge"],
-        steps=merged["optimization"]["steps"],
+        steps=merged["preconditioning"]["steps"],
         split_munis_tolerance=merged["constraints"]["max_muni_splits"],
         split_counties_tolerance=merged["constraints"]["max_county_splits"],
     )

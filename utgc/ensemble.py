@@ -27,7 +27,7 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
             "step": i,
             "population_deviation": pop_dev,
             "vote_share_agg": vote_share_agg,
-            "cut_edges": len(partition["cut_edges"]),
+            "num_cut_edges": len(partition["cut_edges"]),
         }
 
         try:

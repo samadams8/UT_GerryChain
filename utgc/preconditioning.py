@@ -28,7 +28,7 @@ def population_deviation_objective(partition):
     return max_deviation
 
 
-def combined_optimization_objective(
+def combined_preconditioning_objective(
     partition,
     muni_surcharge=9.0,
     muni_splits_tolerance=None,
@@ -53,7 +53,7 @@ def combined_optimization_objective(
     return pop_component + muni_component + county_component
 
 
-def run_optimization(
+def run_preconditioning(
     initial_partition,
     proposal,
     muni_surcharge=9.0,
@@ -65,7 +65,7 @@ def run_optimization(
     max_attempts=5,
 ):
     num_districts = len(initial_partition)
-    print(f"Running optimization for {steps} steps...")
+    print(f"Running preconditioning for {steps} steps...")
     if split_munis_tolerance is not None and split_counties_tolerance is not None:
         print(
             f"Tolerance thresholds: pop_dev={popdev_tolerance:.4f}, muni_splits={split_munis_tolerance}, county_splits={split_counties_tolerance}"
@@ -76,7 +76,7 @@ def run_optimization(
         )
 
     def objective_function(partition):
-        return combined_optimization_objective(
+        return combined_preconditioning_objective(
             partition,
             muni_surcharge=muni_surcharge,
             county_surcharge=county_surcharge,
@@ -89,7 +89,7 @@ def run_optimization(
     optimized_partition = initial_partition
     for attempt in range(max_attempts):
         if attempt > 0:
-            print(f"Retrying optimization (attempt {attempt + 1}/{max_attempts})...")
+            print(f"Retrying preconditioning (attempt {attempt + 1}/{max_attempts})...")
 
         optimizer = SingleMetricOptimizer(
             proposal=proposal,
@@ -100,14 +100,14 @@ def run_optimization(
         )
 
         if attempt == 0:
-            print("Starting optimization...")
+            print("Starting preconditioning...")
 
         for i, partition in enumerate(
             optimizer.short_bursts(5, ceil(steps / 5), with_progress_bar=True)
         ):
             pass
 
-        print(f"Optimized score: {optimizer.best_score}")
+        print(f"Preconditioned score: {optimizer.best_score}")
 
         optimized_partition = optimizer.best_part
 
@@ -121,9 +121,9 @@ def run_optimization(
 
         if pop_passes and muni_passes and county_passes:
             if attempt > 0:
-                print(f"✓ Optimization successful on attempt {attempt + 1}! All tolerances met.")
+                print(f"✓ Preconditioning successful on attempt {attempt + 1}! All tolerances met.")
             else:
-                print(f"✓ Optimization successful! All tolerances met.")
+                print(f"✓ Preconditioning successful! All tolerances met.")
             print(f"Final population deviation: {pop_dev:.6f}")
             print(f"Final municipality splits: {muni_splits}")
             print(f"Final county splits: {county_splits}")
@@ -132,7 +132,6 @@ def run_optimization(
             if attempt < max_attempts - 1:
                 print(f"✗ Attempt {attempt + 1} failed tolerance tests, retrying...")
 
-    print(f"⚠️  WARNING: Optimization failed to meet tolerance requirements after {max_attempts} attempts")
+    print(f"⚠️  WARNING: Preconditioning failed to meet tolerance requirements after {max_attempts} attempts")
     return optimized_partition
-
 

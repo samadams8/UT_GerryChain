@@ -3,7 +3,7 @@
 Modules:
 - data_io: loading geodata and election metadata
 - build: constructors for graph, updaters, partitions, constraints, proposals
-- optimization: objective functions and optimization phase
+- preconditioning: objective functions and preconditioning phase
 - metrics: small helpers and partisan metrics
 - ensemble: MCMC ensemble driver
 - reporting: visualization and summary artifact writers
@@ -12,7 +12,7 @@ Modules:
 __all__ = [
     "data_io",
     "build",
-    "optimization",
+    "preconditioning",
     "metrics",
     "ensemble",
     "reporting",
