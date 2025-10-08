@@ -1,8 +1,6 @@
 """Thin CLI for running Utah redistricting ensemble analysis via utgc modules.
 
-Transitional config behavior:
-- Prefer YAML via --config; CLI flags still accepted but deprecated when used without YAML.
-- Precedence: CLI flags > YAML values > hardcoded defaults.
+Uses EnsembleRunner for unified orchestration.
 """
 
 import argparse
@@ -14,28 +12,7 @@ import warnings
 import pandas as pd
 warnings.filterwarnings('ignore')
 
-from utgc.data_io import (
-    load_data,
-    load_county_boundaries,
-    load_municipality_boundaries,
-    detect_election_data,
-    get_election_columns,
-    filter_elections,
-)
-from utgc.build import (
-    create_graph,
-    create_updaters,
-    create_initial_partition,
-    create_constraints,
-    create_proposal,
-)
-from utgc.preconditioning import run_preconditioning
-from utgc.ensemble import run_ensemble, run_ensemble_tilted
-from utgc.reporting import (
-    save_visualization,
-    save_results,
-    create_summary_plots,
-)
+from utgc.ensemble import EnsembleRunner
 
 
 def main():
@@ -46,39 +23,38 @@ def main():
 
     # Build defaults dict to apply precedence: CLI > YAML > defaults
     defaults = {
-        "constraints": {
-            "use_cut_edges": False,
-            "split_munis_constraint": None,
-            "split_counties_constraint": None,
-            "muni_multi_splits_constraint": None,
-            "county_multi_splits_constraint": None,
+        "initialization": {
+            "nodes_data": "data/UT_precincts.geojson",
+            "initial_partition": "plans/CONG/2025_UT-C/2025_UT-C.shp",
+            "random_seed": 1847,
         },
-        "proposal": {
-            "muni_surcharge": 9.0,
-            "county_surcharge": 3.0,
-            "highered_surcharge": 1.0,
-            "metro_surcharge": 1.0,
-            "schdist_surcharge": 0.1,
-            "water_surcharge": 0.1,
-            "basin_surcharge": 0.1,
+        "constraints": {
+            "pop_deviation": 0.001,
+            "split_munis_constraint": 4,
+            "split_counties_constraint": 4,
+            "muni_multi_splits_constraint": 0,
+            "county_multi_splits_constraint": 1,
+        },
+        "region_surcharges": {
+            "muni": 3,
+            "county": 2,
+            "highered": 1,
+            "metro": 1,
+            "school_district": 0.1,
+            "water_region": 0.1,
+            "basin": 0.1,
+        },
+        "tilted_run": {
+            "less_compact_probability": 0.5,
+        },
+        "ensemble": {
+            "steps": 51,
+            "visualize_every": 1,
         },
         "preconditioning": {
             "enable": True,
             "steps": 20,
-            "split_munis_tolerance": None,
-            "split_counties_tolerance": None,
-            "muni_multi_splits_tolerance": None,
-            "county_multi_splits_tolerance": None,
-        },
-        "ensemble": {
-            "num_steps": 21,
-            "visualize_every": 5,
-            "tilted_run": 0.5,
-        },
-        "election": {
-            "years": "2016,2020,2024",
-            "offices": "PRE,GOV,ATG,AUD,TRE",
-            "vote_share_agg": "median",
+            "max_repeats": 10,
         }
     }
 
@@ -138,8 +114,7 @@ def main():
     
     merged = deep_merge(defaults, yaml_config)
 
-    # Determine output directory for this run, matching config tag/name BEFORE running samplers
-    # Prefer the name of the params directory to match the source config
+    # Determine output directory for this run
     run_tag = None
     try:
         params_dir = os.path.dirname(config_path) if config_path else None
@@ -159,157 +134,16 @@ def main():
     out_dir = os.path.join("results", "ensembles", run_tag)
     os.makedirs(out_dir, exist_ok=True)
 
-    precincts, initial_plan = load_data()
-    print("Loading county boundaries...")
-    counties = load_county_boundaries(precincts)
-    print("Loading municipality boundaries...")
-    municipalities = load_municipality_boundaries(precincts)
-
-    available_elections = detect_election_data(precincts)
-    election_columns = get_election_columns(precincts)
-    years = [int(x) for x in str(merged["election"]["years"]).split(',') if x.strip().isdigit()] if merged.get("election", {}).get("years") else None
-    offices = [x.strip() for x in str(merged["election"]["offices"]).split(',') if x.strip()] if merged.get("election", {}).get("offices") else None
-    filtered_elections = filter_elections(available_elections, years=years, offices=offices)
-    print(f"Available elections: {filtered_elections}")
-
-    print("Initializing MCMC...")
-    graph = create_graph(precincts)
-    updaters_dict = create_updaters(elections=filtered_elections, election_columns=election_columns)
-    initial_partition = create_initial_partition(graph, precincts, updaters_dict)
-    ideal_population = sum(initial_partition["population"].values()) / len(initial_partition)
-    print(f"Ideal population per district: {ideal_population:,.0f}")
-
-    constraints_list = create_constraints(
-        initial_partition,
-        use_cut_edges=bool(merged["constraints"]["use_cut_edges"]),
-        split_munis_constraint=merged["constraints"]["split_munis_constraint"],
-        split_counties_constraint=merged["constraints"]["split_counties_constraint"],
-        muni_multi_splits_constraint=merged["constraints"]["muni_multi_splits_constraint"],
-        county_multi_splits_constraint=merged["constraints"]["county_multi_splits_constraint"],
-    )
-
-    print(f"Using region surcharges:")
-    print(f"  Municipality: {merged['proposal']['muni_surcharge']}")
-    print(f"  County: {merged['proposal']['county_surcharge']}")
-    print(f"  Higher Ed COI: {merged['proposal']['highered_surcharge']}")
-    print(f"  Metro/Micro COI: {merged['proposal']['metro_surcharge']}")
-    print(f"  School District COI: {merged['proposal']['schdist_surcharge']}")
-    print(f"  Hydrologic Basin COI: {merged['proposal']['basin_surcharge']}")
-    print(f"  Water Planning Area COI: {merged['proposal']['water_surcharge']}")
-    print(f"  Cut edges constraint: {'enabled' if merged['constraints']['use_cut_edges'] else 'disabled'}")
-
-    proposal = create_proposal(
-        ideal_population,
-        precincts,
-        muni_surcharge=merged["proposal"]["muni_surcharge"],
-        county_surcharge=merged["proposal"]["county_surcharge"],
-        highered_surcharge=merged["proposal"]["highered_surcharge"],
-        metro_surcharge=merged["proposal"]["metro_surcharge"],
-        schdist_surcharge=merged["proposal"]["schdist_surcharge"],
-        basin_surcharge=merged["proposal"]["basin_surcharge"],
-        water_surcharge=merged["proposal"]["water_surcharge"],
-    )
-
-    print("\n" + "=" * 60)
-    print("RUNNING PRECONDITIONING PHASE")
-    print("=" * 60)
-    optimized_partition = run_preconditioning(
-        initial_partition,
-        proposal,
-        muni_surcharge=merged["proposal"]["muni_surcharge"],
-        county_surcharge=merged["proposal"]["county_surcharge"],
-        steps=merged["preconditioning"]["steps"],
-        split_munis_tolerance=merged["constraints"]["split_munis_constraint"],
-        split_counties_tolerance=merged["constraints"]["split_counties_constraint"],
-        muni_multi_splits_tolerance=merged["constraints"]["muni_multi_splits_constraint"],
-        county_multi_splits_tolerance=merged["constraints"]["county_multi_splits_constraint"],
-    )
-
-    print("\n" + "=" * 60)
-    print("RUNNING ENSEMBLE ANALYSIS")
-    print("=" * 60)
-
-    def partition_satisfies_all(partition, constraints_to_check):
-        for c in constraints_to_check:
-            try:
-                if not c(partition):
-                    return False
-            except Exception:
-                return False
-        return True
-
-    if partition_satisfies_all(optimized_partition, constraints_list):
-        print("Using optimized partition as starting point for ensemble")
-        ensemble_start_partition = optimized_partition
-        active_constraints = constraints_list
-    elif partition_satisfies_all(initial_partition, constraints_list):
-        print("Warning: Optimized partition does not meet ensemble constraints, using original partition")
-        ensemble_start_partition = initial_partition
-        active_constraints = constraints_list
-    else:
-        print("Warning: Neither optimized nor initial partition meets all constraints. Filtering to satisfied subset.")
-        filtered_constraints = []
-        for c in constraints_list:
-            try:
-                if c(initial_partition):
-                    filtered_constraints.append(c)
-            except Exception:
-                pass
-        ensemble_start_partition = initial_partition
-        active_constraints = filtered_constraints
-
-    # Before running the sampler, persist the exact configuration used (defaults merged with YAML)
-    try:
-        params_out_path = os.path.join(out_dir, "params.yaml")
-        effective = {k: merged.get(k) for k in merged.keys()}
-        # Also persist the resolved years/offices strings for clarity
-        effective["years"] = merged.get("years")
-        effective["offices"] = merged.get("offices")
-        with open(params_out_path, "w") as f:
-            yaml.safe_dump(effective, f, sort_keys=True)
-        print(f"Saved run parameters to: {params_out_path}")
-    except Exception:
-        pass
-
-    # Choose sampler based on tilted-run intensity (map to optimizer p=1-value)
-    tilt_intensity = max(0.0, min(1.0, float(merged["ensemble"]["tilted_run"])) )
-    if tilt_intensity <= 0.0:
-        print("Using neutral sampler (tilted-run=0.0)")
-        results = run_ensemble(
-            ensemble_start_partition,
-            proposal,
-            active_constraints,
-            filtered_elections,
-            counties=counties,
-            municipalities=municipalities,
-            num_steps=int(merged["ensemble"]["num_steps"]),
-            visualize_every=int(merged["ensemble"]["visualize_every"]),
-            vote_share_agg=str(merged["election"]["vote_share_agg"]),
-            save_visualization_fn=lambda part, step, res, counties, municipalities: save_visualization(part, step, res, counties, municipalities, base_dir=out_dir),
-        )
-    else:
-        p = 1.0 - tilt_intensity
-        print(f"Using tilted-run sampler with intensity={tilt_intensity} (optimizer p={p})")
-        results = run_ensemble_tilted(
-            ensemble_start_partition,
-            proposal,
-            active_constraints,
-            filtered_elections,
-            counties=counties,
-            municipalities=municipalities,
-            num_steps=int(merged["ensemble"]["num_steps"]),
-            visualize_every=int(merged["ensemble"]["visualize_every"]),
-            vote_share_agg=str(merged["election"]["vote_share_agg"]),
-            save_visualization_fn=lambda part, step, res, counties, municipalities: save_visualization(part, step, res, counties, municipalities, base_dir=out_dir),
-            p=p,
-        )
-
-    # Neutral mode output when there are no elections
-    neutral_mode = len(filtered_elections) == 0
-    save_results(results, filtered_elections, mode=("neutral" if neutral_mode else None), out_dir=out_dir)
+    # Use EnsembleRunner for simplified orchestration
+    print("Initializing ensemble runner...")
+    runner = EnsembleRunner(merged)
+    
+    print("Running ensemble analysis...")
+    results = runner.run(output_dir=out_dir, save_config=True)
+    
     print("Ensemble analysis complete!")
-    summary_df = pd.read_csv(os.path.join(out_dir, "ensemble_summary.csv"))
-    create_summary_plots(summary_df, out_dir=out_dir)
+    print(f"Generated {len(results)} maps")
+    print(f"Results saved to: {out_dir}")
 
 if __name__ == "__main__":
     main()

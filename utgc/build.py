@@ -1,4 +1,6 @@
 from functools import partial
+import random
+import numpy as np
 from gerrychain import Graph, GeographicPartition, updaters, constraints
 from gerrychain.proposals import recom
 from gerrychain.tree import bipartition_tree
@@ -66,9 +68,16 @@ def create_initial_partition(graph, precincts, updaters_dict):
     return initial_partition
 
 
+def set_random_seed(seed):
+    """Set random seed for reproducibility."""
+    random.seed(seed)
+    np.random.seed(seed)
+    print(f"Random seed set to {seed}")
+
+
 def create_constraints(
     initial_partition, 
-    use_cut_edges=False, 
+    pop_deviation=0.001,
     split_munis_constraint=None, 
     split_counties_constraint=None,
     muni_multi_splits_constraint=None,
@@ -78,7 +87,7 @@ def create_constraints(
     print("Creating constraints...")
 
     population_constraint = constraints.within_percent_of_ideal_population(
-        initial_partition, 0.001
+        initial_partition, pop_deviation
     )
     contiguity_constraint = contiguous
 
@@ -153,25 +162,35 @@ def get_county_multi_splits(partition):
         return 0
 
 
-def create_proposal(ideal_population, precincts, muni_surcharge=9, county_surcharge=3, highered_surcharge=1, metro_surcharge=0.5, schdist_surcharge=0.5, basin_surcharge=2.0, water_surcharge=2.0):
-    """Create ReCom proposal with region surcharges."""
+def create_proposal(ideal_population, precincts, region_surcharge_params):
+    """Create ReCom proposal with region surcharges.
+    
+    Args:
+        ideal_population: Target population per district
+        precincts: GeoDataFrame with precinct data
+        region_surcharge_params: Dict with keys matching notebook interface:
+            {'muni': 3, 'county': 2, 'highered': 1, 'metro': 1, 
+             'school_district': 0.1, 'water_region': 0.1, 'basin': 0.1}
+    """
     print("Creating ReCom proposal...")
 
+    # Map notebook parameter names to column names
+    column_mapping = {
+        'muni': 'MUNIID',
+        'county': 'COUNTYID', 
+        'highered': 'HIGHERED_ID',
+        'metro': 'METRO_ID',
+        'school_district': 'SCHDIST_ID',
+        'water_region': 'WATER_ID',
+        'basin': 'BASIN_ID'
+    }
+
     region_surcharge = {}
-    if "MUNIID" in precincts.columns and muni_surcharge > 0:
-        region_surcharge["MUNIID"] = muni_surcharge
-    if "COUNTYID" in precincts.columns and county_surcharge > 0:
-        region_surcharge["COUNTYID"] = county_surcharge
-    if "HIGHERED_ID" in precincts.columns and highered_surcharge > 0:
-        region_surcharge["HIGHERED_ID"] = highered_surcharge
-    if "METRO_ID" in precincts.columns and metro_surcharge > 0:
-        region_surcharge["METRO_ID"] = metro_surcharge
-    if "SCHDIST_ID" in precincts.columns and schdist_surcharge > 0:
-        region_surcharge["SCHDIST_ID"] = schdist_surcharge
-    if "BASIN_ID" in precincts.columns and basin_surcharge > 0:
-        region_surcharge["BASIN_ID"] = basin_surcharge
-    if "WATER_ID" in precincts.columns and water_surcharge > 0:
-        region_surcharge["WATER_ID"] = water_surcharge
+    for param_name, surcharge_value in region_surcharge_params.items():
+        if param_name in column_mapping:
+            column_name = column_mapping[param_name]
+            if column_name in precincts.columns and surcharge_value > 0:
+                region_surcharge[column_name] = surcharge_value
 
     proposal = partial(
         recom,

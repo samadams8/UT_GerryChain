@@ -30,14 +30,11 @@ def population_deviation_objective(partition):
 
 def combined_preconditioning_objective(
     partition,
-    muni_surcharge=9.0,
     muni_splits_tolerance=None,
     muni_multi_splits_tolerance=None,
-    county_surcharge=3.0,
     county_splits_tolerance=None,
     county_multi_splits_tolerance=None,
     pop_tolerance=0.001,
-    num_districts=4,
 ):
     pop_dev = population_deviation_objective(partition)
     muni_splits = get_num_split_munis(partition)
@@ -70,7 +67,7 @@ def combined_preconditioning_objective(
             return 0
 
 
-    pop_component = _ceiling_objective(pop_dev, pop_tolerance)
+    pop_component = _ceiling_objective(pop_dev/pop_tolerance, 1)
     muni_component = _ceiling_objective(muni_splits, muni_splits_tolerance)
     muni_multi_component = _ceiling_objective(muni_multi_splits, muni_multi_splits_tolerance)
     county_component = _ceiling_objective(county_splits, county_splits_tolerance)
@@ -85,8 +82,6 @@ def combined_preconditioning_objective(
 def run_preconditioning(
     initial_partition,
     proposal,
-    muni_surcharge=9.0,
-    county_surcharge=3.0,
     popdev_tolerance=0.001,
     steps=20,
     split_munis_tolerance=None,
@@ -109,14 +104,11 @@ def run_preconditioning(
     def objective_function(partition):
         return combined_preconditioning_objective(
             partition,
-            muni_surcharge=muni_surcharge,
-            county_surcharge=county_surcharge,
             pop_tolerance=popdev_tolerance,
             muni_splits_tolerance=split_munis_tolerance,
             county_splits_tolerance=split_counties_tolerance,
             muni_multi_splits_tolerance=muni_multi_splits_tolerance,
             county_multi_splits_tolerance=county_multi_splits_tolerance,
-            num_districts=num_districts,
         )
 
     optimized_partition = initial_partition

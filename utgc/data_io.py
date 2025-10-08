@@ -5,11 +5,20 @@ import geopandas as gpd
 import maup
 
 
-def load_data():
-    """Load precinct data and initial congressional plan."""
+def load_data(nodes_data_path=None, initial_partition_path=None):
+    """Load precinct data and initial congressional plan.
+    
+    Args:
+        nodes_data_path: Path to precincts GeoJSON file. Defaults to "data/UT_precincts.geojson"
+        initial_partition_path: Path to initial plan shapefile. Defaults to "plans/CONG/2025_UT-C/2025_UT-C.shp"
+    
+    Returns:
+        tuple: (precincts, initial_plan) GeoDataFrames
+    """
     print("Loading data...")
 
-    precincts_path = "data/UT_precincts.geojson"
+    # Use provided paths or fall back to defaults for backward compatibility
+    precincts_path = nodes_data_path or "data/UT_precincts.geojson"
     if not os.path.exists(precincts_path):
         print(f"Error: {precincts_path} not found. Run 02_compile_precincts.py first.")
         sys.exit(1)
@@ -17,7 +26,7 @@ def load_data():
     precincts = gpd.read_file(precincts_path)
     print(f"Loaded {len(precincts)} precincts")
 
-    initial_plan_path = "plans/CONG/2025_UT-C/2025_UT-C.shp"
+    initial_plan_path = initial_partition_path or "plans/CONG/2025_UT-C/2025_UT-C.shp"
     if not os.path.exists(initial_plan_path):
         print(f"Error: {initial_plan_path} not found.")
         sys.exit(1)
