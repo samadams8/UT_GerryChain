@@ -16,14 +16,14 @@ def create_graph(precincts):
     return graph
 
 
-def create_updaters(elections=[], election_columns=[]):
+def create_updaters(elections=[], election_columns=[], num_municipalities=None, num_counties=None):
     """Create updaters for the ensemble analysis."""
     print("Creating updaters...")
 
     updaters_dict = {
         "population": updaters.Tally("TOTPOP", alias="population"),
         "cut_edges": updaters.cut_edges,
-        "num_cut_edges": lambda partition: len(partition["cut_edges"]),
+        "num_cut_edges": lambda p: len(p["cut_edges"]),
         "perimeter": updaters.perimeter,
         "area": updaters.Tally("area", alias="area"),
         "muni_locality_splits": LocalitySplits(
@@ -32,12 +32,20 @@ def create_updaters(elections=[], election_columns=[]):
             pop_col="TOTPOP",
             scores_to_compute=["num_split_localities", "num_parts"],
         ),
+        "split_munis": lambda p: p["muni_locality_splits"].get(
+            "num_split_localities", 0),
+        "muni_multi_splits": lambda p: p["muni_locality_splits"].get(
+            "num_parts", 0) - p["split_munis"] - num_municipalities,
         "county_locality_splits": LocalitySplits(
             name="county_locality_splits",
             col_id="COUNTYID",
             pop_col="TOTPOP",
             scores_to_compute=["num_split_localities", "num_parts"],
         ),
+        "split_counties": lambda p: p["county_locality_splits"].get(
+            "num_split_localities", 0),
+        "county_multi_splits": lambda p: p["county_locality_splits"].get(
+            "num_parts", 0) - p["split_counties"] - num_counties,
     }
 
     if len(elections) > 0:
@@ -123,8 +131,7 @@ def create_constraints(
 def get_muni_splits(partition):
     """Extract municipality split count (num_split_localities) from partition."""
     try:
-        muni_ls = partition["muni_locality_splits"]
-        return muni_ls.get("num_split_localities", 0)
+        return int(partition["split_munis"])  # central updater
     except Exception:
         return 0
 
@@ -132,11 +139,7 @@ def get_muni_splits(partition):
 def get_muni_multi_splits(partition):
     """Extract municipality multi-splits (num_parts - num_split_localities - total_munis) from partition."""
     try:
-        muni_ls = partition["muni_locality_splits"]
-        num_parts = muni_ls.get("num_parts", 0)
-        num_split_localities = muni_ls.get("num_split_localities", 0)
-        total_munis = len(set(partition.graph.nodes[node].get("MUNIID") for node in partition.graph.nodes if partition.graph.nodes[node].get("MUNIID")))
-        return num_parts - num_split_localities - total_munis
+        return int(partition["muni_multi_splits"])  # central updater
     except Exception:
         return 0
 
@@ -144,8 +147,7 @@ def get_muni_multi_splits(partition):
 def get_county_splits(partition):
     """Extract county split count (num_split_localities) from partition."""
     try:
-        county_ls = partition["county_locality_splits"]
-        return county_ls.get("num_split_localities", 0)
+        return int(partition["split_counties"])  # central updater
     except Exception:
         return 0
 
@@ -153,11 +155,7 @@ def get_county_splits(partition):
 def get_county_multi_splits(partition):
     """Extract county multi-splits (num_parts - num_split_localities - total_counties) from partition."""
     try:
-        county_ls = partition["county_locality_splits"]
-        num_parts = county_ls.get("num_parts", 0)
-        num_split_localities = county_ls.get("num_split_localities", 0)
-        total_counties = len(set(partition.graph.nodes[node].get("COUNTYID") for node in partition.graph.nodes if partition.graph.nodes[node].get("COUNTYID")))
-        return num_parts - num_split_localities - total_counties
+        return int(partition["county_multi_splits"])  # central updater
     except Exception:
         return 0
 

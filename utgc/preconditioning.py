@@ -1,20 +1,19 @@
 from math import ceil
 from gerrychain.optimization import SingleMetricOptimizer
 from gerrychain.constraints import contiguous
+from .metrics import build_locality_name_maps, compute_split_name_lists
 
 
 def get_num_split_munis(partition):
     try:
-        muni_ls = partition["muni_locality_splits"]
-        return int(muni_ls.get("num_split_localities", 0))
+        return int(partition["split_munis"])  # central updater
     except Exception:
         return 0
 
 
 def get_num_split_counties(partition):
     try:
-        county_ls = partition["county_locality_splits"]
-        return int(county_ls.get("num_split_localities", 0))
+        return int(partition["split_counties"])  # central updater
     except Exception:
         return 0
 
@@ -40,22 +39,13 @@ def combined_preconditioning_objective(
     muni_splits = get_num_split_munis(partition)
     county_splits = get_num_split_counties(partition)
     
-    # Get multi-splits (num_parts - num_split_localities - total_localities)
+    # Get multi-splits from central updaters
     try:
-        muni_ls = partition["muni_locality_splits"]
-        num_parts = muni_ls.get("num_parts", 0)
-        num_split_localities = muni_ls.get("num_split_localities", 0)
-        total_munis = len(set(partition.graph.nodes[node].get("MUNIID") for node in partition.graph.nodes if partition.graph.nodes[node].get("MUNIID")))
-        muni_multi_splits = num_parts - num_split_localities - total_munis
+        muni_multi_splits = int(partition["muni_multi_splits"]) if "muni_multi_splits" in partition.updaters else 0
     except Exception:
         muni_multi_splits = 0
-    
     try:
-        county_ls = partition["county_locality_splits"]
-        num_parts = county_ls.get("num_parts", 0)
-        num_split_localities = county_ls.get("num_split_localities", 0)
-        total_counties = len(set(partition.graph.nodes[node].get("COUNTYID") for node in partition.graph.nodes if partition.graph.nodes[node].get("COUNTYID")))
-        county_multi_splits = num_parts - num_split_localities - total_counties
+        county_multi_splits = int(partition["county_multi_splits"]) if "county_multi_splits" in partition.updaters else 0
     except Exception:
         county_multi_splits = 0
 
@@ -74,7 +64,7 @@ def combined_preconditioning_objective(
     county_multi_component = _ceiling_objective(county_multi_splits, county_multi_splits_tolerance)
 
     print(f"Population deviation: {pop_dev:.6f}, Muni splits: {muni_splits}, Muni multi-splits: {muni_multi_splits}, County splits: {county_splits}, County multi-splits: {county_multi_splits}")
-    print(f"Population component: {pop_component:.6f}, Muni component: {muni_component:.6f}, Muni multi-component: {muni_multi_component:.6f}, County component: {county_component:.6f}, County multi-component: {county_multi_component:.6f}")
+    # print(f"Population component: {pop_component:.6f}, Muni component: {muni_component:.6f}, Muni multi-component: {muni_multi_component:.6f}, County component: {county_component:.6f}, County multi-component: {county_multi_component:.6f}")
 
     return pop_component + muni_component + muni_multi_component + county_component + county_multi_component
 
@@ -89,6 +79,10 @@ def run_preconditioning(
     muni_multi_splits_tolerance=None,
     county_multi_splits_tolerance=None,
     max_attempts=5,
+    # Optional: automatically increase region surcharges tied to failing constraints
+    auto_adjust_region_surcharge=True,
+    region_adjust_factor=1.25,
+    region_surcharge_max=None,
 ):
     num_districts = len(initial_partition)
     print(f"Running preconditioning for {steps} steps...")
@@ -112,12 +106,36 @@ def run_preconditioning(
         )
 
     optimized_partition = initial_partition
+    current_proposal = proposal
+
+    # Extract initial surcharges from the proposal's region_surcharge
+    region_surcharge_params = None
+    if auto_adjust_region_surcharge:
+        try:
+            kw = getattr(proposal, 'keywords', {}) or {}
+            rs = kw.get('region_surcharge') or {}
+            # Map core columns back to the friendly keys we adjust here
+            inferred = {}
+            if 'MUNIID' in rs:
+                inferred['muni'] = rs['MUNIID']
+            if 'COUNTYID' in rs:
+                inferred['county'] = rs['COUNTYID']
+            # Keep other existing keys if present and numeric
+            for k_col, v in rs.items():
+                if k_col not in ('MUNIID', 'COUNTYID'):
+                    # Pass-through by best-effort using original column key
+                    inferred[k_col] = v
+            if inferred:
+                region_surcharge_params = inferred
+                print(f"Inferred initial region surcharges from proposal: {region_surcharge_params}")
+        except Exception:
+            pass
     for attempt in range(max_attempts):
         if attempt > 0:
             print(f"Retrying preconditioning (attempt {attempt + 1}/{max_attempts})...")
 
         optimizer = SingleMetricOptimizer(
-            proposal=proposal,
+            proposal=current_proposal,
             constraints=[contiguous],
             initial_state=optimized_partition,
             optimization_metric=objective_function,
@@ -140,24 +158,51 @@ def run_preconditioning(
         muni_splits = get_num_split_munis(optimized_partition)
         county_splits = get_num_split_counties(optimized_partition)
         
-        # Get multi-splits (num_parts - num_split_localities - total_localities)
+        # Get multi-splits from central updaters
         try:
-            muni_ls = optimized_partition["muni_locality_splits"]
-            num_parts = muni_ls.get("num_parts", 0)
-            num_split_localities = muni_ls.get("num_split_localities", 0)
-            total_munis = len(set(optimized_partition.graph.nodes[node].get("MUNIID") for node in optimized_partition.graph.nodes if optimized_partition.graph.nodes[node].get("MUNIID")))
-            muni_multi_splits = num_parts - num_split_localities - total_munis
+            muni_multi_splits = int(optimized_partition["muni_multi_splits"]) if "muni_multi_splits" in optimized_partition.updaters else 0
         except Exception:
             muni_multi_splits = 0
         
         try:
-            county_ls = optimized_partition["county_locality_splits"]
-            num_parts = county_ls.get("num_parts", 0)
-            num_split_localities = county_ls.get("num_split_localities", 0)
-            total_counties = len(set(optimized_partition.graph.nodes[node].get("COUNTYID") for node in optimized_partition.graph.nodes if optimized_partition.graph.nodes[node].get("COUNTYID")))
-            county_multi_splits = num_parts - num_split_localities - total_counties
+            county_multi_splits = int(optimized_partition["county_multi_splits"]) if "county_multi_splits" in optimized_partition.updaters else 0
         except Exception:
             county_multi_splits = 0
+
+        # Report which municipalities and counties are split and multi-split
+        try:
+            county_id_to_name, muni_id_to_name = build_locality_name_maps(optimized_partition)
+            split_counties_names, split_munis_names = compute_split_name_lists(optimized_partition, county_id_to_name, muni_id_to_name)
+            # multi-split = municipalities appearing in 3+ districts
+            muni_to_districts = {}
+            for node in optimized_partition.graph.nodes:
+                node_data = optimized_partition.graph.nodes[node]
+                muni_id = node_data.get("MUNIID")
+                if muni_id:
+                    dist = optimized_partition.assignment[node]
+                    if muni_id not in muni_to_districts:
+                        muni_to_districts[muni_id] = set()
+                    muni_to_districts[muni_id].add(dist)
+            multi_split_muni_ids = sorted([mid for mid, dists in muni_to_districts.items() if len(dists) > 2])
+            multi_split_muni_names = [muni_id_to_name.get(mid, str(mid)) for mid in multi_split_muni_ids]
+            print("Split municipalities:", ", ".join(split_munis_names) if split_munis_names else "None")
+            print("Multi-split municipalities:", ", ".join(sorted(multi_split_muni_names)) if multi_split_muni_names else "None")
+            # multi-split = counties appearing in 3+ districts
+            county_to_districts = {}
+            for node in optimized_partition.graph.nodes:
+                node_data = optimized_partition.graph.nodes[node]
+                county_id = node_data.get("COUNTYID")
+                if county_id:
+                    dist = optimized_partition.assignment[node]
+                    if county_id not in county_to_districts:
+                        county_to_districts[county_id] = set()
+                    county_to_districts[county_id].add(dist)
+            multi_split_county_ids = sorted([cid for cid, dists in county_to_districts.items() if len(dists) > 2])
+            multi_split_county_names = [county_id_to_name.get(cid, str(cid)) for cid in multi_split_county_ids]
+            print("Split counties:", ", ".join(split_counties_names) if split_counties_names else "None")
+            print("Multi-split counties:", ", ".join(sorted(multi_split_county_names)) if multi_split_county_names else "None")
+        except Exception:
+            pass
 
         pop_passes = pop_dev <= popdev_tolerance
         muni_passes = (split_munis_tolerance is None) or (muni_splits <= split_munis_tolerance)
@@ -179,6 +224,55 @@ def run_preconditioning(
         else:
             if attempt < max_attempts - 1:
                 print(f"✗ Attempt {attempt + 1} failed tolerance tests, retrying...")
+                # Optionally escalate region surcharges associated with failing constraints
+                if auto_adjust_region_surcharge and region_surcharge_params is not None:
+                    updated = False
+                    # Increase municipality-related surcharge if muni constraints failed
+                    if (split_munis_tolerance is not None and muni_splits > split_munis_tolerance) or (
+                        muni_multi_splits_tolerance is not None and muni_multi_splits > muni_multi_splits_tolerance
+                    ):
+                        if 'muni' in region_surcharge_params:
+                            old_val = region_surcharge_params['muni']
+                            new_val = old_val * float(region_adjust_factor)
+                            if region_surcharge_max is not None:
+                                try:
+                                    new_val = min(new_val, float(region_surcharge_max))
+                                except Exception:
+                                    pass
+                            region_surcharge_params['muni'] = new_val
+                            print(f"  ↳ Increasing municipality region surcharge: ({old_val}) -> ({region_surcharge_params['muni']})")
+                            updated = True
+                    # Increase county-related surcharge if county constraints failed
+                    if (split_counties_tolerance is not None and county_splits > split_counties_tolerance) or (
+                        county_multi_splits_tolerance is not None and county_multi_splits > county_multi_splits_tolerance
+                    ):
+                        if 'county' in region_surcharge_params:
+                            old_val = region_surcharge_params['county']
+                            new_val = old_val * float(region_adjust_factor)
+                            if region_surcharge_max is not None:
+                                try:
+                                    new_val = min(new_val, float(region_surcharge_max))
+                                except Exception:
+                                    pass
+                            region_surcharge_params['county'] = new_val
+                            print(f"  ↳ Increasing county region surcharge: ({old_val}) -> ({region_surcharge_params['county']})")
+                            updated = True
+                    # Update proposal in-place if anything changed
+                    if updated:
+                        try:
+                            kw = getattr(current_proposal, 'keywords', {}) or {}
+                            rs = kw.get('region_surcharge')
+                            if isinstance(rs, dict):
+                                # Update known columns in-place
+                                if 'muni' in region_surcharge_params:
+                                    rs['MUNIID'] = region_surcharge_params['muni']
+                                if 'county' in region_surcharge_params:
+                                    rs['COUNTYID'] = region_surcharge_params['county']
+                                print(f"  ↳ Updated proposal.region_surcharge in-place: {rs}")
+                            else:
+                                print("  ↳ Could not access proposal.region_surcharge for in-place update")
+                        except Exception as e:
+                            print(f"  ↳ Failed to update proposal in-place after surcharge update: {e}")
 
     print(f"⚠️  WARNING: Preconditioning failed to meet tolerance requirements after {max_attempts} attempts")
     return optimized_partition

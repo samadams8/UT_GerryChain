@@ -73,22 +73,18 @@ def _collect_step_metrics(partition, step, available_elections, vote_share_agg):
         "num_cut_edges": len(partition["cut_edges"]),
     }
 
-    # County splits
+    # County splits (from central updaters)
     try:
-        county_ls = partition["county_locality_splits"]
-        step_results["split_counties_count"] = county_ls.get("num_split_localities", 0)
-        total_counties = len(set(partition.graph.nodes[node].get("COUNTYID") for node in partition.graph.nodes if partition.graph.nodes[node].get("COUNTYID")))
-        step_results["split_counties_extra_parts"] = county_ls.get("num_parts", 0) - county_ls.get("num_split_localities", 0) - total_counties
+        step_results["split_counties_count"] = int(partition["split_counties"]) if "split_counties" in partition.updaters else 0
+        step_results["split_counties_extra_parts"] = int(partition["county_multi_splits"]) if "county_multi_splits" in partition.updaters else 0
     except Exception:
         step_results["split_counties_count"] = 0
         step_results["split_counties_extra_parts"] = 0
 
-    # Municipality splits
+    # Municipality splits (from central updaters)
     try:
-        muni_ls = partition["muni_locality_splits"]
-        step_results["split_munis_count"] = muni_ls.get("num_split_localities", 0)
-        total_munis = len(set(partition.graph.nodes[node].get("MUNIID") for node in partition.graph.nodes if partition.graph.nodes[node].get("MUNIID")))
-        step_results["split_munis_extra_parts"] = muni_ls.get("num_parts", 0) - muni_ls.get("num_split_localities", 0) - total_munis
+        step_results["split_munis_count"] = int(partition["split_munis"]) if "split_munis" in partition.updaters else 0
+        step_results["split_munis_extra_parts"] = int(partition["muni_multi_splits"]) if "muni_multi_splits" in partition.updaters else 0
     except Exception:
         step_results["split_munis_count"] = 0
         step_results["split_munis_extra_parts"] = 0
@@ -227,6 +223,12 @@ class EnsembleRunner:
         # Load boundary data for visualization
         self.counties = load_county_boundaries(self.precincts)
         self.municipalities = load_municipality_boundaries(self.precincts)
+
+        # Compute internal constants for number of municipalities and counties
+        NUM_MUNICIPALITIES = self.precincts["MUNIID"].nunique()
+        NUM_COUNTIES = self.precincts["COUNTYID"].nunique()
+        print(f"Number of municipalities: {NUM_MUNICIPALITIES}")
+        print(f"Number of counties: {NUM_COUNTIES}")
         
         # Detect and filter elections
         available_elections = detect_election_data(self.precincts)
@@ -242,7 +244,9 @@ class EnsembleRunner:
         # Build graph and partition
         self.graph = create_graph(self.precincts)
         self.updaters = create_updaters(elections=self.available_elections, 
-                                       election_columns=election_columns)
+                                       election_columns=election_columns,
+                                       num_municipalities=NUM_MUNICIPALITIES,
+                                       num_counties=NUM_COUNTIES)
         self.initial_partition = create_initial_partition(self.graph, 
                                                          self.precincts, 
                                                          self.updaters)
@@ -291,6 +295,11 @@ class EnsembleRunner:
             'split_counties_tolerance': precond_params.get('split_counties_constraint'),
             'muni_multi_splits_tolerance': precond_params.get('muni_multi_splits_constraint'),
             'county_multi_splits_tolerance': precond_params.get('county_multi_splits_constraint'),
+            'max_attempts': precond_params.get('max_repeats', 5),
+            # Optional auto-adjust controls
+            'auto_adjust_region_surcharge': precond_params.get('auto_adjust_region_surcharge', True),
+            'region_adjust_factor': precond_params.get('region_adjust_factor', 1.25),
+            'region_surcharge_max': precond_params.get('region_surcharge_max'),
         }
         
         optimized_partition = run_preconditioning(
