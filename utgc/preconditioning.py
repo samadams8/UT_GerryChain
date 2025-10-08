@@ -56,7 +56,6 @@ def combined_preconditioning_objective(
         else:
             return 0
 
-
     pop_component = _ceiling_objective(pop_dev/pop_tolerance, 1)
     muni_component = _ceiling_objective(muni_splits, muni_splits_tolerance)
     muni_multi_component = _ceiling_objective(muni_multi_splits, muni_multi_splits_tolerance)

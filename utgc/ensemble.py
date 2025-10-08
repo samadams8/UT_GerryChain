@@ -262,6 +262,9 @@ class EnsembleRunner:
         """Orchestrate full pipeline: preconditioning -> ensemble -> save results."""
         print("Starting ensemble analysis...")
         
+        # Store output directory for use in visualization
+        self.output_dir = output_dir
+        
         # Run preconditioning if enabled
         start_partition = self._run_preconditioning()
         
@@ -361,7 +364,7 @@ class EnsembleRunner:
             counties = self.counties
         if municipalities is None:
             municipalities = self.municipalities
-        save_visualization(partition, step, step_results, counties, municipalities)
+        save_visualization(partition, step, step_results, counties, municipalities, base_dir=self.output_dir)
     
     def _save_results(self, results, output_dir):
         """Save results and create visualizations."""
