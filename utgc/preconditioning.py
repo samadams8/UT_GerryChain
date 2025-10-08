@@ -63,9 +63,6 @@ def combined_preconditioning_objective(
     county_component = _ceiling_objective(county_splits, county_splits_tolerance)
     county_multi_component = _ceiling_objective(county_multi_splits, county_multi_splits_tolerance)
 
-    print(f"Population deviation: {pop_dev:.6f}, Muni splits: {muni_splits}, Muni multi-splits: {muni_multi_splits}, County splits: {county_splits}, County multi-splits: {county_multi_splits}")
-    # print(f"Population component: {pop_component:.6f}, Muni component: {muni_component:.6f}, Muni multi-component: {muni_multi_component:.6f}, County component: {county_component:.6f}, County multi-component: {county_multi_component:.6f}")
-
     return pop_component + muni_component + muni_multi_component + county_component + county_multi_component
 
 

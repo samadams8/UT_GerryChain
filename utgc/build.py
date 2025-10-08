@@ -7,16 +7,15 @@ from gerrychain.tree import bipartition_tree
 from gerrychain.constraints import contiguous, UpperBound
 from gerrychain.updaters.locality_split_scores import LocalitySplits
 
-
 def create_graph(precincts):
     """Create GerryChain graph from precincts."""
     print("Creating graph...")
+    
     graph = Graph.from_geodataframe(precincts)
     print(f"Graph created with {len(graph.nodes)} nodes and {len(graph.edges)} edges")
     return graph
 
-
-def create_updaters(elections=[], election_columns=[], num_municipalities=None, num_counties=None):
+def create_updaters(elections=[], election_columns=[], num_muniids=None, num_countyids=None):
     """Create updaters for the ensemble analysis."""
     print("Creating updaters...")
 
@@ -35,7 +34,7 @@ def create_updaters(elections=[], election_columns=[], num_municipalities=None, 
         "split_munis": lambda p: p["muni_locality_splits"].get(
             "num_split_localities", 0),
         "muni_multi_splits": lambda p: p["muni_locality_splits"].get(
-            "num_parts", 0) - p["split_munis"] - num_municipalities,
+            "num_parts", 0) - p["split_munis"] - num_muniids,
         "county_locality_splits": LocalitySplits(
             name="county_locality_splits",
             col_id="COUNTYID",
@@ -45,7 +44,7 @@ def create_updaters(elections=[], election_columns=[], num_municipalities=None, 
         "split_counties": lambda p: p["county_locality_splits"].get(
             "num_split_localities", 0),
         "county_multi_splits": lambda p: p["county_locality_splits"].get(
-            "num_parts", 0) - p["split_counties"] - num_counties,
+            "num_parts", 0) - p["split_counties"] - num_countyids,
     }
 
     if len(elections) > 0:

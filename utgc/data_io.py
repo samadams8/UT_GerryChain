@@ -3,7 +3,7 @@ import os
 import sys
 import geopandas as gpd
 import maup
-
+import numpy as np
 
 def load_data(nodes_data_path=None, initial_partition_path=None):
     """Load precinct data and initial congressional plan.
@@ -26,6 +26,32 @@ def load_data(nodes_data_path=None, initial_partition_path=None):
     precincts = gpd.read_file(precincts_path)
     print(f"Loaded {len(precincts)} precincts")
 
+    # Create unique IDs for unincorporated municipalities
+    if any(precincts["MUNIID"] == ""):
+        print("Found %d nodes assigned to %d incorporated municipalities" % (
+            (precincts["MUNIID"] != "").sum(),
+            len(set(precincts[precincts["MUNIID"] != ""]["MUNIID"]))
+        ))
+        print("Assigning unique IDs to unincorporated nodes...")
+        
+        # Get existing numeric MUNIIDs
+        existing_muniids = precincts[precincts["MUNIID"] != ""]["MUNIID"]
+        if len(existing_muniids) > 0:
+            max_id = int(existing_muniids.astype(int).max())
+        else:
+            max_id = 0
+
+        # Generate unique sequential IDs for unincorporated areas
+        unincorporated_mask = precincts["MUNIID"] == ""
+        unincorporated_count = unincorporated_mask.sum()
+        if unincorporated_count > 0:
+            precincts.loc[unincorporated_mask, "MUNIID"] = np.arange(max_id + 1, max_id + 1 + unincorporated_count)
+            print(f"Assigned unique IDs to {unincorporated_count} unincorporated nodes")
+        
+        # Print final municipality count
+        num_unique_munis = len(set(precincts["MUNIID"]))
+        print(f"Total unique MUNIIDs: {num_unique_munis}")
+    
     initial_plan_path = initial_partition_path or "plans/CONG/2025_UT-C/2025_UT-C.shp"
     if not os.path.exists(initial_plan_path):
         print(f"Error: {initial_plan_path} not found.")

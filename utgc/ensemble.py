@@ -219,17 +219,16 @@ class EnsembleRunner:
             nodes_data_path=config['initialization']['nodes_data'],
             initial_partition_path=config['initialization']['initial_partition']
         )
+        # Based on the precincts, compute the number of unique MUNIIDs and COUNTYIDs
+        NUM_MUNIIDS = self.precincts["MUNIID"].nunique()
+        print(f"Number of unique MUNIIDs: {NUM_MUNIIDS}")
+        NUM_COUNTYIDS = self.precincts["COUNTYID"].nunique()
+        print(f"Number of unique COUNTYIDs: {NUM_COUNTYIDS}")
         
         # Load boundary data for visualization
         self.counties = load_county_boundaries(self.precincts)
         self.municipalities = load_municipality_boundaries(self.precincts)
 
-        # Compute internal constants for number of municipalities and counties
-        NUM_MUNICIPALITIES = self.precincts["MUNIID"].nunique()
-        NUM_COUNTIES = self.precincts["COUNTYID"].nunique()
-        print(f"Number of municipalities: {NUM_MUNICIPALITIES}")
-        print(f"Number of counties: {NUM_COUNTIES}")
-        
         # Detect and filter elections
         available_elections = detect_election_data(self.precincts)
         election_columns = get_election_columns(self.precincts)
@@ -245,8 +244,8 @@ class EnsembleRunner:
         self.graph = create_graph(self.precincts)
         self.updaters = create_updaters(elections=self.available_elections, 
                                        election_columns=election_columns,
-                                       num_municipalities=NUM_MUNICIPALITIES,
-                                       num_counties=NUM_COUNTIES)
+                                       num_muniids=NUM_MUNIIDS,
+                                       num_countyids=NUM_COUNTYIDS)
         self.initial_partition = create_initial_partition(self.graph, 
                                                          self.precincts, 
                                                          self.updaters)
