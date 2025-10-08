@@ -2,7 +2,7 @@ from functools import partial
 from gerrychain import Graph, GeographicPartition, updaters, constraints
 from gerrychain.proposals import recom
 from gerrychain.tree import bipartition_tree
-from gerrychain.constraints import contiguous
+from gerrychain.constraints import contiguous, UpperBound
 from gerrychain.updaters.locality_split_scores import LocalitySplits
 
 
@@ -24,15 +24,15 @@ def create_updaters(elections=[], election_columns=[]):
         "num_cut_edges": lambda partition: len(partition["cut_edges"]),
         "perimeter": updaters.perimeter,
         "area": updaters.Tally("area", alias="area"),
-        "county_locality_splits": LocalitySplits(
-            name="county_locality_splits",
-            col_id="COUNTYID",
-            pop_col="TOTPOP",
-            scores_to_compute=["num_split_localities", "num_parts"],
-        ),
         "muni_locality_splits": LocalitySplits(
             name="muni_locality_splits",
             col_id="MUNIID",
+            pop_col="TOTPOP",
+            scores_to_compute=["num_split_localities", "num_parts"],
+        ),
+        "county_locality_splits": LocalitySplits(
+            name="county_locality_splits",
+            col_id="COUNTYID",
             pop_col="TOTPOP",
             scores_to_compute=["num_split_localities", "num_parts"],
         ),
@@ -66,7 +66,14 @@ def create_initial_partition(graph, precincts, updaters_dict):
     return initial_partition
 
 
-def create_constraints(initial_partition, use_cut_edges=False, max_muni_splits=None, max_county_splits=None):
+def create_constraints(
+    initial_partition, 
+    use_cut_edges=False, 
+    split_munis_constraint=None, 
+    split_counties_constraint=None,
+    muni_multi_splits_constraint=None,
+    county_multi_splits_constraint=None
+):
     """Create constraints according to Utah redistricting requirements."""
     print("Creating constraints...")
 
@@ -76,8 +83,74 @@ def create_constraints(initial_partition, use_cut_edges=False, max_muni_splits=N
     contiguity_constraint = contiguous
 
     constraints_list = [population_constraint, contiguity_constraint]
+    
+    # Add municipality split constraint if specified
+    if split_munis_constraint is not None:
+        muni_constraint = UpperBound(get_muni_splits, split_munis_constraint)
+        constraints_list.append(muni_constraint)
+        print(f"  Added municipality splits constraint: max {split_munis_constraint}")
+    
+    # Add municipality multi-splits constraint if specified
+    if muni_multi_splits_constraint is not None:
+        muni_multi_bound = UpperBound(get_muni_multi_splits, muni_multi_splits_constraint)
+        constraints_list.append(muni_multi_bound)
+        print(f"  Added municipality multi-splits constraint: max {muni_multi_splits_constraint}")
+    
+    # Add county split constraint if specified
+    if split_counties_constraint is not None:
+        county_constraint = UpperBound(get_county_splits, split_counties_constraint)
+        constraints_list.append(county_constraint)
+        print(f"  Added county splits constraint: max {split_counties_constraint}")
+    
+    # Add county multi-splits constraint if specified
+    if county_multi_splits_constraint is not None:
+        county_multi_bound = UpperBound(get_county_multi_splits, county_multi_splits_constraint)
+        constraints_list.append(county_multi_bound)
+        print(f"  Added county multi-splits constraint: max {county_multi_splits_constraint}")
 
     return constraints_list
+
+
+def get_muni_splits(partition):
+    """Extract municipality split count (num_split_localities) from partition."""
+    try:
+        muni_ls = partition["muni_locality_splits"]
+        return muni_ls.get("num_split_localities", 0)
+    except Exception:
+        return 0
+
+
+def get_muni_multi_splits(partition):
+    """Extract municipality multi-splits (num_parts - num_split_localities - total_munis) from partition."""
+    try:
+        muni_ls = partition["muni_locality_splits"]
+        num_parts = muni_ls.get("num_parts", 0)
+        num_split_localities = muni_ls.get("num_split_localities", 0)
+        total_munis = len(set(partition.graph.nodes[node].get("MUNIID") for node in partition.graph.nodes if partition.graph.nodes[node].get("MUNIID")))
+        return num_parts - num_split_localities - total_munis
+    except Exception:
+        return 0
+
+
+def get_county_splits(partition):
+    """Extract county split count (num_split_localities) from partition."""
+    try:
+        county_ls = partition["county_locality_splits"]
+        return county_ls.get("num_split_localities", 0)
+    except Exception:
+        return 0
+
+
+def get_county_multi_splits(partition):
+    """Extract county multi-splits (num_parts - num_split_localities - total_counties) from partition."""
+    try:
+        county_ls = partition["county_locality_splits"]
+        num_parts = county_ls.get("num_parts", 0)
+        num_split_localities = county_ls.get("num_split_localities", 0)
+        total_counties = len(set(partition.graph.nodes[node].get("COUNTYID") for node in partition.graph.nodes if partition.graph.nodes[node].get("COUNTYID")))
+        return num_parts - num_split_localities - total_counties
+    except Exception:
+        return 0
 
 
 def create_proposal(ideal_population, precincts, muni_surcharge=9, county_surcharge=3, highered_surcharge=1, metro_surcharge=0.5, schdist_surcharge=0.5, basin_surcharge=2.0, water_surcharge=2.0):

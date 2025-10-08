@@ -48,8 +48,10 @@ def main():
     defaults = {
         "constraints": {
             "use_cut_edges": False,
-            "max_muni_splits": None,
-            "max_county_splits": None,
+            "split_munis_constraint": None,
+            "split_counties_constraint": None,
+            "muni_multi_splits_constraint": None,
+            "county_multi_splits_constraint": None,
         },
         "proposal": {
             "muni_surcharge": 9.0,
@@ -63,6 +65,10 @@ def main():
         "preconditioning": {
             "enable": True,
             "steps": 20,
+            "split_munis_tolerance": None,
+            "split_counties_tolerance": None,
+            "muni_multi_splits_tolerance": None,
+            "county_multi_splits_tolerance": None,
         },
         "ensemble": {
             "num_steps": 21,
@@ -176,8 +182,10 @@ def main():
     constraints_list = create_constraints(
         initial_partition,
         use_cut_edges=bool(merged["constraints"]["use_cut_edges"]),
-        max_muni_splits=merged["constraints"]["max_muni_splits"],
-        max_county_splits=merged["constraints"]["max_county_splits"],
+        split_munis_constraint=merged["constraints"]["split_munis_constraint"],
+        split_counties_constraint=merged["constraints"]["split_counties_constraint"],
+        muni_multi_splits_constraint=merged["constraints"]["muni_multi_splits_constraint"],
+        county_multi_splits_constraint=merged["constraints"]["county_multi_splits_constraint"],
     )
 
     print(f"Using region surcharges:")
@@ -211,8 +219,10 @@ def main():
         muni_surcharge=merged["proposal"]["muni_surcharge"],
         county_surcharge=merged["proposal"]["county_surcharge"],
         steps=merged["preconditioning"]["steps"],
-        split_munis_tolerance=merged["constraints"]["max_muni_splits"],
-        split_counties_tolerance=merged["constraints"]["max_county_splits"],
+        split_munis_tolerance=merged["constraints"]["split_munis_constraint"],
+        split_counties_tolerance=merged["constraints"]["split_counties_constraint"],
+        muni_multi_splits_tolerance=merged["constraints"]["muni_multi_splits_constraint"],
+        county_multi_splits_tolerance=merged["constraints"]["county_multi_splits_constraint"],
     )
 
     print("\n" + "=" * 60)

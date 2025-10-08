@@ -32,25 +32,54 @@ def combined_preconditioning_objective(
     partition,
     muni_surcharge=9.0,
     muni_splits_tolerance=None,
+    muni_multi_splits_tolerance=None,
     county_surcharge=3.0,
     county_splits_tolerance=None,
+    county_multi_splits_tolerance=None,
     pop_tolerance=0.001,
     num_districts=4,
 ):
     pop_dev = population_deviation_objective(partition)
     muni_splits = get_num_split_munis(partition)
     county_splits = get_num_split_counties(partition)
+    
+    # Get multi-splits (num_parts - num_split_localities - total_localities)
+    try:
+        muni_ls = partition["muni_locality_splits"]
+        num_parts = muni_ls.get("num_parts", 0)
+        num_split_localities = muni_ls.get("num_split_localities", 0)
+        total_munis = len(set(partition.graph.nodes[node].get("MUNIID") for node in partition.graph.nodes if partition.graph.nodes[node].get("MUNIID")))
+        muni_multi_splits = num_parts - num_split_localities - total_munis
+    except Exception:
+        muni_multi_splits = 0
+    
+    try:
+        county_ls = partition["county_locality_splits"]
+        num_parts = county_ls.get("num_parts", 0)
+        num_split_localities = county_ls.get("num_split_localities", 0)
+        total_counties = len(set(partition.graph.nodes[node].get("COUNTYID") for node in partition.graph.nodes if partition.graph.nodes[node].get("COUNTYID")))
+        county_multi_splits = num_parts - num_split_localities - total_counties
+    except Exception:
+        county_multi_splits = 0
 
-    if muni_splits_tolerance is None:
-        muni_splits_tolerance = 2 * num_districts
-    if county_splits_tolerance is None:
-        county_splits_tolerance = 2 * num_districts
+    def _ceiling_objective(value, ceiling):
+        # When the value is above the ceiling, return a positive value that grows with squared error
+        if value > ceiling:
+            return abs(value - ceiling) ** 2
+        else:
+            return 0
 
-    pop_component = pop_dev / pop_tolerance
-    muni_component = muni_splits / muni_splits_tolerance
-    county_component = county_splits / county_splits_tolerance
 
-    return pop_component + muni_component + county_component
+    pop_component = _ceiling_objective(pop_dev, pop_tolerance)
+    muni_component = _ceiling_objective(muni_splits, muni_splits_tolerance)
+    muni_multi_component = _ceiling_objective(muni_multi_splits, muni_multi_splits_tolerance)
+    county_component = _ceiling_objective(county_splits, county_splits_tolerance)
+    county_multi_component = _ceiling_objective(county_multi_splits, county_multi_splits_tolerance)
+
+    print(f"Population deviation: {pop_dev:.6f}, Muni splits: {muni_splits}, Muni multi-splits: {muni_multi_splits}, County splits: {county_splits}, County multi-splits: {county_multi_splits}")
+    print(f"Population component: {pop_component:.6f}, Muni component: {muni_component:.6f}, Muni multi-component: {muni_multi_component:.6f}, County component: {county_component:.6f}, County multi-component: {county_multi_component:.6f}")
+
+    return pop_component + muni_component + muni_multi_component + county_component + county_multi_component
 
 
 def run_preconditioning(
@@ -62,6 +91,8 @@ def run_preconditioning(
     steps=20,
     split_munis_tolerance=None,
     split_counties_tolerance=None,
+    muni_multi_splits_tolerance=None,
+    county_multi_splits_tolerance=None,
     max_attempts=5,
 ):
     num_districts = len(initial_partition)
@@ -83,6 +114,8 @@ def run_preconditioning(
             pop_tolerance=popdev_tolerance,
             muni_splits_tolerance=split_munis_tolerance,
             county_splits_tolerance=split_counties_tolerance,
+            muni_multi_splits_tolerance=muni_multi_splits_tolerance,
+            county_multi_splits_tolerance=county_multi_splits_tolerance,
             num_districts=num_districts,
         )
 
@@ -114,19 +147,42 @@ def run_preconditioning(
         pop_dev = population_deviation_objective(optimized_partition)
         muni_splits = get_num_split_munis(optimized_partition)
         county_splits = get_num_split_counties(optimized_partition)
+        
+        # Get multi-splits (num_parts - num_split_localities - total_localities)
+        try:
+            muni_ls = optimized_partition["muni_locality_splits"]
+            num_parts = muni_ls.get("num_parts", 0)
+            num_split_localities = muni_ls.get("num_split_localities", 0)
+            total_munis = len(set(optimized_partition.graph.nodes[node].get("MUNIID") for node in optimized_partition.graph.nodes if optimized_partition.graph.nodes[node].get("MUNIID")))
+            muni_multi_splits = num_parts - num_split_localities - total_munis
+        except Exception:
+            muni_multi_splits = 0
+        
+        try:
+            county_ls = optimized_partition["county_locality_splits"]
+            num_parts = county_ls.get("num_parts", 0)
+            num_split_localities = county_ls.get("num_split_localities", 0)
+            total_counties = len(set(optimized_partition.graph.nodes[node].get("COUNTYID") for node in optimized_partition.graph.nodes if optimized_partition.graph.nodes[node].get("COUNTYID")))
+            county_multi_splits = num_parts - num_split_localities - total_counties
+        except Exception:
+            county_multi_splits = 0
 
         pop_passes = pop_dev <= popdev_tolerance
         muni_passes = (split_munis_tolerance is None) or (muni_splits <= split_munis_tolerance)
+        muni_multi_passes = (muni_multi_splits_tolerance is None) or (muni_multi_splits <= muni_multi_splits_tolerance)
         county_passes = (split_counties_tolerance is None) or (county_splits <= split_counties_tolerance)
+        county_multi_passes = (county_multi_splits_tolerance is None) or (county_multi_splits <= county_multi_splits_tolerance)
 
-        if pop_passes and muni_passes and county_passes:
+        if pop_passes and muni_passes and muni_multi_passes and county_passes and county_multi_passes:
             if attempt > 0:
                 print(f"✓ Preconditioning successful on attempt {attempt + 1}! All tolerances met.")
             else:
                 print(f"✓ Preconditioning successful! All tolerances met.")
             print(f"Final population deviation: {pop_dev:.6f}")
             print(f"Final municipality splits: {muni_splits}")
+            print(f"Final municipality multi-splits: {muni_multi_splits}")
             print(f"Final county splits: {county_splits}")
+            print(f"Final county multi-splits: {county_multi_splits}")
             return optimized_partition
         else:
             if attempt < max_attempts - 1:

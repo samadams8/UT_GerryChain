@@ -34,7 +34,7 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
             county_ls = partition["county_locality_splits"]
             step_results["split_counties_count"] = county_ls.get("num_split_localities", 0)
             total_counties = len(set(partition.graph.nodes[node].get("COUNTYID") for node in partition.graph.nodes if partition.graph.nodes[node].get("COUNTYID")))
-            step_results["split_counties_extra_parts"] = county_ls.get("num_parts", 0) - total_counties
+            step_results["split_counties_extra_parts"] = county_ls.get("num_parts", 0) - county_ls.get("num_split_localities", 0) - total_counties
         except Exception as e:
             step_results["split_counties_count"] = 0
             step_results["split_counties_extra_parts"] = 0
@@ -43,7 +43,7 @@ def run_ensemble(initial_partition, proposal, constraints_list, available_electi
             muni_ls = partition["muni_locality_splits"]
             step_results["split_munis_count"] = muni_ls.get("num_split_localities", 0)
             total_munis = len(set(partition.graph.nodes[node].get("MUNIID") for node in partition.graph.nodes if partition.graph.nodes[node].get("MUNIID")))
-            step_results["split_munis_extra_parts"] = muni_ls.get("num_parts", 0) - total_munis
+            step_results["split_munis_extra_parts"] = muni_ls.get("num_parts", 0) - muni_ls.get("num_split_localities", 0) - total_munis
         except Exception as e:
             step_results["split_munis_count"] = 0
             step_results["split_munis_extra_parts"] = 0
@@ -201,7 +201,7 @@ def run_ensemble_tilted(
             county_ls = partition["county_locality_splits"]
             step_results["split_counties_count"] = county_ls.get("num_split_localities", 0)
             total_counties = len(set(partition.graph.nodes[node].get("COUNTYID") for node in partition.graph.nodes if partition.graph.nodes[node].get("COUNTYID")))
-            step_results["split_counties_extra_parts"] = county_ls.get("num_parts", 0) - total_counties
+            step_results["split_counties_extra_parts"] = county_ls.get("num_parts", 0) - county_ls.get("num_split_localities", 0) - total_counties
         except Exception as e:
             step_results["split_counties_count"] = 0
             step_results["split_counties_extra_parts"] = 0
@@ -210,7 +210,7 @@ def run_ensemble_tilted(
             muni_ls = partition["muni_locality_splits"]
             step_results["split_munis_count"] = muni_ls.get("num_split_localities", 0)
             total_munis = len(set(partition.graph.nodes[node].get("MUNIID") for node in partition.graph.nodes if partition.graph.nodes[node].get("MUNIID")))
-            step_results["split_munis_extra_parts"] = muni_ls.get("num_parts", 0) - total_munis
+            step_results["split_munis_extra_parts"] = muni_ls.get("num_parts", 0) - muni_ls.get("num_split_localities", 0) - total_munis
         except Exception as e:
             step_results["split_munis_count"] = 0
             step_results["split_munis_extra_parts"] = 0
