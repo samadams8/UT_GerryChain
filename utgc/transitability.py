@@ -398,7 +398,7 @@ def build_transitable_graph(
             'min_lake_size_sqkm': 1.0,
             'min_river_size_sqkm': 0.5,
             'road_buffer_meters': 500.0,
-            'water_threshold': 0.5
+            'water_threshold': 0.1
         }
     
     if not transitability_params.get('enable', True):
