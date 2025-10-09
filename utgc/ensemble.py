@@ -241,7 +241,8 @@ class EnsembleRunner:
         self.vote_share_agg = election_config.get('vote_share_agg', 'median')
         
         # Build graph and partition
-        self.graph = create_graph(self.precincts)
+        transitability_params = config.get('transitability', {})
+        self.graph = create_graph(self.precincts, transitability_params)
         self.updaters = create_updaters(elections=self.available_elections, 
                                        election_columns=election_columns,
                                        num_muniids=NUM_MUNIIDS,

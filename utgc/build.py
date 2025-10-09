@@ -2,16 +2,86 @@ from functools import partial
 import random
 import numpy as np
 from gerrychain import Graph, GeographicPartition, updaters, constraints
+import os
+import networkx as nx
 from gerrychain.proposals import recom
 from gerrychain.tree import bipartition_tree
 from gerrychain.constraints import contiguous, UpperBound
 from gerrychain.updaters.locality_split_scores import LocalitySplits
 
-def create_graph(precincts):
-    """Create GerryChain graph from precincts."""
+def create_graph(precincts, transitability_params=None):
+    """Create GerryChain graph from precincts with optional transitability analysis or precomputed graph.
+
+    If `transitability_params` contains `precomputed_path`, this function will attempt to load a
+    precomputed transitability-aware graph from disk. Supported formats:
+      - GraphML (file extension .graphml)
+      - JSON edge list (file extension .json) with objects {"source": u, "target": v}
+
+    Otherwise, if `enable` is true, it will build the graph on the fly using transitability.
+    Fallback is a standard adjacency graph from the precinct geometries.
+    """
     print("Creating graph...")
-    
-    graph = Graph.from_geodataframe(precincts)
+
+    params = transitability_params or {}
+
+    # 1) Load precomputed graph if provided
+    precomputed_path = params.get("precomputed_path")
+    if precomputed_path:
+        if not os.path.exists(precomputed_path):
+            raise FileNotFoundError(f"Precomputed graph not found: {precomputed_path}")
+        print(f"Loading precomputed graph from {precomputed_path}...")
+
+        ext = os.path.splitext(precomputed_path)[1].lower()
+        nx_graph = None
+
+        if ext == ".graphml":
+            nx_graph = nx.read_graphml(precomputed_path)
+        elif ext == ".json":
+            # Expect an edge list JSON: [{"source": u, "target": v}, ...]
+            import json
+            with open(precomputed_path, "r") as f:
+                edge_list = json.load(f)
+            nx_graph = nx.Graph()
+            for e in edge_list:
+                u = e.get("source")
+                v = e.get("target")
+                if u is None or v is None:
+                    continue
+                nx_graph.add_edge(u, v)
+        else:
+            raise ValueError(f"Unsupported precomputed graph format: {ext}")
+
+        # Convert node labels to the precinct index type if possible
+        # Precincts are expected to be indexed to match node labels
+        # Ensure all nodes exist in precincts index; coerce to int when safe
+        def coerce_node(n):
+            try:
+                # Try int cast then fall back
+                ni = int(n)
+                return ni
+            except Exception:
+                return n
+
+        remapped = Graph()
+        # Add nodes with attributes if present
+        for n, attrs in nx_graph.nodes(data=True):
+            nn = coerce_node(n)
+            remapped.add_node(nn, **attrs)
+        # Add edges
+        for u, v, attrs in nx_graph.edges(data=True):
+            remapped.add_edge(coerce_node(u), coerce_node(v), **attrs)
+
+        print(f"Graph loaded with {len(remapped.nodes)} nodes and {len(remapped.edges)} edges")
+        return remapped
+
+    # 2) Build transitability-aware graph on the fly
+    if params.get('enable', False):
+        print("Applying transitability analysis...")
+        from .transitability import build_transitable_graph
+        graph = build_transitable_graph(precincts, params)
+    else:
+        graph = Graph.from_geodataframe(precincts)
+
     print(f"Graph created with {len(graph.nodes)} nodes and {len(graph.edges)} edges")
     return graph
 
