@@ -29,50 +29,54 @@ def create_graph(precincts, transitability_params=None):
     if precomputed_path:
         if not os.path.exists(precomputed_path):
             raise FileNotFoundError(f"Precomputed graph not found: {precomputed_path}")
-        print(f"Loading precomputed graph from {precomputed_path}...")
+        print(f"Loading precomputed transitability edges from {precomputed_path}...")
 
+        # Start with the precincts graph (has all node attributes)
+        graph = Graph.from_geodataframe(precincts)
+        print(f"Base graph: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
+
+        # Load the transitability edges
         ext = os.path.splitext(precomputed_path)[1].lower()
-        nx_graph = None
+        transitability_edges = []
 
         if ext == ".graphml":
             nx_graph = nx.read_graphml(precomputed_path)
+            transitability_edges = list(nx_graph.edges())
         elif ext == ".json":
             # Expect an edge list JSON: [{"source": u, "target": v}, ...]
             import json
             with open(precomputed_path, "r") as f:
                 edge_list = json.load(f)
-            nx_graph = nx.Graph()
             for e in edge_list:
                 u = e.get("source")
                 v = e.get("target")
-                if u is None or v is None:
-                    continue
-                nx_graph.add_edge(u, v)
+                if u is not None and v is not None:
+                    transitability_edges.append((u, v))
         else:
             raise ValueError(f"Unsupported precomputed graph format: {ext}")
 
-        # Convert node labels to the precinct index type if possible
-        # Precincts are expected to be indexed to match node labels
-        # Ensure all nodes exist in precincts index; coerce to int when safe
+        # Convert node labels to match precincts index
         def coerce_node(n):
             try:
-                # Try int cast then fall back
-                ni = int(n)
-                return ni
+                return int(n)
             except Exception:
                 return n
 
-        remapped = Graph()
-        # Add nodes with attributes if present
-        for n, attrs in nx_graph.nodes(data=True):
-            nn = coerce_node(n)
-            remapped.add_node(nn, **attrs)
-        # Add edges
-        for u, v, attrs in nx_graph.edges(data=True):
-            remapped.add_edge(coerce_node(u), coerce_node(v), **attrs)
+        # Replace edges with transitability edges
+        print("Applying transitability edges...")
+        # Clear existing edges
+        graph.clear_edges()
+        
+        # Add transitability edges
+        for u, v in transitability_edges:
+            u_coerced = coerce_node(u)
+            v_coerced = coerce_node(v)
+            # Only add edge if both nodes exist in the graph
+            if u_coerced in graph.nodes and v_coerced in graph.nodes:
+                graph.add_edge(u_coerced, v_coerced)
 
-        print(f"Graph loaded with {len(remapped.nodes)} nodes and {len(remapped.edges)} edges")
-        return remapped
+        print(f"Transitability graph: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
+        return graph
 
     # 2) Build transitability-aware graph on the fly
     if params.get('enable', False):

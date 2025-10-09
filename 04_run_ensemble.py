@@ -136,7 +136,11 @@ def main():
 
     # Use EnsembleRunner for simplified orchestration
     print("Initializing ensemble runner...")
-    runner = EnsembleRunner(merged)
+    
+    # Check for transitability_graph parameter in config
+    transitability_graph = merged.get('transitability', {}).get('precomputed_path', None)
+    
+    runner = EnsembleRunner(merged, transitability_graph=transitability_graph)
     
     print("Running ensemble analysis...")
     results = runner.run(output_dir=out_dir, save_config=True)

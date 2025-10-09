@@ -194,7 +194,7 @@ def _collect_step_metrics(partition, step, available_elections, vote_share_agg):
 class EnsembleRunner:
     """Unified orchestrator for ensemble analysis that eliminates code duplication."""
     
-    def __init__(self, config):
+    def __init__(self, config, transitability_graph=None):
         """Initialize runner from config dict matching notebook structure.
         
         Config structure:
@@ -207,8 +207,17 @@ class EnsembleRunner:
             'preconditioning': {'enable': True, 'steps': 20, ...},
             'election': {'years': '2016,2020,2024', 'offices': 'PRE,GOV,ATG,AUD,TRE', 'vote_share_agg': 'median'}
         }
+        
+        Parameters
+        ----------
+        config : dict
+            Configuration dictionary
+        transitability_graph : str, optional
+            Path to precomputed transitability graph (JSON or GraphML format).
+            If provided, this will be used instead of building the graph from scratch.
         """
         self.config = config
+        self.transitability_graph = transitability_graph
         
         # Set random seed if provided
         if 'random_seed' in config.get('initialization', {}):
@@ -242,6 +251,14 @@ class EnsembleRunner:
         
         # Build graph and partition
         transitability_params = config.get('transitability', {})
+        
+        # Use provided transitability graph if available, otherwise use config
+        if self.transitability_graph:
+            print(f"Using provided transitability graph: {self.transitability_graph}")
+            # Override the precomputed_path in transitability_params
+            transitability_params = transitability_params.copy()
+            transitability_params['precomputed_path'] = self.transitability_graph
+        
         self.graph = create_graph(self.precincts, transitability_params)
         self.updaters = create_updaters(elections=self.available_elections, 
                                        election_columns=election_columns,

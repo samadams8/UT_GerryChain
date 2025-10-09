@@ -9,6 +9,7 @@ data/UT_blocks.geojson
 data/UT_precincts.geojson
 output/
 todos.md
+*.png
 
 # Python venv and cache
 .venv/
