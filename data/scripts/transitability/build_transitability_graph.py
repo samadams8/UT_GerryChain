@@ -80,6 +80,13 @@ def main() -> int:
         "verify_road_connectivity": bool(args.verify_road_connectivity),
         "road_buffer_meters": float(args.road_buffer_meters),
         "water_threshold": float(args.water_threshold),
+        # Use combined method (union of removals) as requested
+        "water_method": "both",
+        # Separate thresholds: centroid=0.1, boundary=0.75
+        "water_threshold_centroid": 0.1,
+        "water_threshold_boundary": 0.75,
+        "water_buffer_m": 150,
+        "road_boundary_buffer_m": 15,
     }
     if args.verbose:
         print("Transitability params:")
@@ -116,6 +123,35 @@ def main() -> int:
     print(f"  - graphml: {gml_path}")
     print(f"  - json: {json_path}")
     print(f"  - metadata: {out_dir / 'metadata.yaml'}")
+
+    # Post-export tests
+    try:
+        fully_connected = nx.is_connected(graph)
+        print(f"Connected (entire graph): {fully_connected}")
+        # County connectivity test
+        precincts_df = gpd.read_file(args.precincts)
+        county_connected = True
+        if 'COUNTYID' in precincts_df.columns:
+            precincts_df = precincts_df[['COUNTYID']].copy()
+            # Map node -> county
+            county_map = {}
+            for n in graph.nodes:
+                try:
+                    county_map[n] = precincts_df.loc[n, 'COUNTYID']
+                except Exception:
+                    county_map[n] = None
+            counties = sorted(set(v for v in county_map.values() if v is not None))
+            for c in counties:
+                nodes_c = [n for n, v in county_map.items() if v == c]
+                if len(nodes_c) <= 1:
+                    continue
+                sub = graph.subgraph(nodes_c)
+                if not nx.is_connected(sub):
+                    county_connected = False
+                    print(f"County not connected: {c} ({len(nodes_c)} nodes)")
+        print(f"Connected (each county): {county_connected}")
+    except Exception as e:
+        print(f"Post-export tests failed: {e}")
     return 0
 
 

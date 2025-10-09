@@ -19,6 +19,8 @@ from typing import Dict, List, Tuple, Optional, Union
 from gerrychain import Graph
 import warnings
 import maup
+from shapely.ops import unary_union
+from shapely.geometry import LineString
 
 def load_road_network(
     roads_path: str = "data/geography_processed/UtahRoads_filtered.shp",
@@ -291,7 +293,6 @@ def identify_water_crossings(
         p2_geom = precincts_proj.loc[row['precinct_2'], 'geometry']
         
         # Create line between centroids
-        from shapely.geometry import LineString
         line = LineString([p1_geom.centroid, p2_geom.centroid])
         
         # Check for intersections with water bodies
@@ -322,6 +323,170 @@ def identify_water_crossings(
     print(f"  Edges crossing water: {water_removed:,}")
     
     return pd.DataFrame(water_crossings)
+
+def _union_buffered_water_single(water_bodies: gpd.GeoDataFrame, buffer_m: float) -> object:
+    wb = water_bodies.copy()
+    if buffer_m and buffer_m > 0:
+        wb["geometry"] = wb.geometry.buffer(buffer_m)
+    return wb.unary_union
+
+def _has_direct_road_bridge(
+    boundary_geom,
+    p1_geom,
+    p2_geom,
+    roads_gdf: gpd.GeoDataFrame,
+    side_buffer_m: int = 15,
+) -> bool:
+    if boundary_geom is None or boundary_geom.is_empty:
+        return False
+    # Build a small corridor around the boundary
+    corridor = boundary_geom.buffer(side_buffer_m)
+    # Candidate roads by bbox filter
+    try:
+        sindex = roads_gdf.sindex
+        candidates = list(sindex.intersection(corridor.bounds))
+        if not candidates:
+            return False
+        roads_near = roads_gdf.iloc[candidates]
+    except Exception:
+        roads_near = roads_gdf
+    u_buf = p1_geom.buffer(side_buffer_m)
+    v_buf = p2_geom.buffer(side_buffer_m)
+    for _, r in roads_near.iterrows():
+        g = r.geometry
+        if g is None or g.is_empty:
+            continue
+        if not g.intersects(corridor):
+            continue
+        if g.intersects(u_buf) and g.intersects(v_buf):
+            return True
+    return False
+
+def remove_water_edges_by_boundary_ratio_with_road_exception(
+    precincts: gpd.GeoDataFrame,
+    water_bodies: gpd.GeoDataFrame,
+    connections: pd.DataFrame,
+    base_graph: Graph,
+    roads: gpd.GeoDataFrame,
+    water_threshold: float = 0.75,
+    water_buffer_m: int = 150,
+    side_buffer_m: int = 15,
+) -> pd.DataFrame:
+    """Experimental water pruning:
+    If the shared boundary is mostly water (>= water_threshold), remove the edge unless
+    there is a direct road bridge intersecting the boundary and touching both sides.
+    """
+    precincts_proj = precincts.to_crs(water_bodies.crs)
+    roads_proj = roads.to_crs(water_bodies.crs)
+    water_union = _union_buffered_water_single(water_bodies, buffer_m=water_buffer_m)
+
+    out_rows = []
+    for _, row in connections.iterrows():
+        u = row['precinct_1']
+        v = row['precinct_2']
+        connected = bool(row['connected'])
+        if not connected:
+            out_rows.append({
+                'precinct_1': u,
+                'precinct_2': v,
+                'connected': False,
+                'fallback_type': row.get('fallback_type', 'road'),
+                'water_barrier': False
+            })
+            continue
+        try:
+            p1 = precincts_proj.loc[u, 'geometry']
+            p2 = precincts_proj.loc[v, 'geometry']
+        except Exception:
+            out_rows.append({
+                'precinct_1': u,
+                'precinct_2': v,
+                'connected': connected,
+                'fallback_type': row.get('fallback_type', 'road'),
+                'water_barrier': False
+            })
+            continue
+
+        # Shared boundary
+        boundary = p1.boundary.intersection(p2.boundary)
+        b_len = float(boundary.length) if boundary is not None else 0.0
+        if b_len <= 0.0:
+            # No meaningful shared boundary -> keep as is
+            out_rows.append({
+                'precinct_1': u,
+                'precinct_2': v,
+                'connected': connected,
+                'fallback_type': row.get('fallback_type', 'road'),
+                'water_barrier': False
+            })
+            continue
+        inter = boundary.intersection(water_union)
+        ratio = float(inter.length) / b_len if (inter is not None and not inter.is_empty) else 0.0
+
+        if ratio >= float(water_threshold):
+            # Require road bridge to keep
+            bridged = _has_direct_road_bridge(boundary, p1, p2, roads_proj, side_buffer_m=side_buffer_m)
+            keep = bridged
+            out_rows.append({
+                'precinct_1': u,
+                'precinct_2': v,
+                'connected': keep,
+                'fallback_type': row.get('fallback_type', 'road'),
+                'water_barrier': not keep
+            })
+        else:
+            out_rows.append({
+                'precinct_1': u,
+                'precinct_2': v,
+                'connected': True,
+                'fallback_type': row.get('fallback_type', 'road'),
+                'water_barrier': False
+            })
+
+    return pd.DataFrame(out_rows)
+
+def _combine_water_methods_union(
+    centroid_df: pd.DataFrame,
+    boundary_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Combine results from two water methods; prune union of removals.
+
+    Keeps an edge connected only if BOTH methods keep it connected.
+    Marks water_barrier True if either method flags it.
+    """
+    # Normalize keys to tuple for robust merge
+    def keyify(df: pd.DataFrame) -> pd.Series:
+        return list(zip(df['precinct_1'], df['precinct_2']))
+
+    c = centroid_df.copy()
+    b = boundary_df.copy()
+    c['__key__'] = keyify(c)
+    b['__key__'] = keyify(b)
+    # Outer merge to include any pair appearing in either
+    merged = c.set_index('__key__').join(
+        b.set_index('__key__'), how='outer', lsuffix='_c', rsuffix='_b'
+    ).reset_index()
+
+    out_rows = []
+    for _, r in merged.iterrows():
+        # Pull ids from whichever side exists
+        u = int(r.get('precinct_1_c') if pd.notna(r.get('precinct_1_c')) else r.get('precinct_1_b'))
+        v = int(r.get('precinct_2_c') if pd.notna(r.get('precinct_2_c')) else r.get('precinct_2_b'))
+        conn_c = bool(r.get('connected_c', True))  # default keep if missing
+        conn_b = bool(r.get('connected_b', True))
+        connected = conn_c and conn_b
+        wb_c = bool(r.get('water_barrier_c', False))
+        wb_b = bool(r.get('water_barrier_b', False))
+        water_barrier = wb_c or wb_b or (not connected)
+        out_rows.append({
+            'precinct_1': u,
+            'precinct_2': v,
+            'connected': connected,
+            'fallback_type': r.get('fallback_type_c', r.get('fallback_type_b', 'road')),
+            'water_barrier': water_barrier,
+        })
+
+    return pd.DataFrame(out_rows)
 
 def test_graph_connectivity(graph, step_name="Graph", raise_error=True):
     """
@@ -434,12 +599,41 @@ def build_transitable_graph(
                 })
         road_connections = pd.DataFrame(road_connections)
     
-    # Step 4: Water barrier analysis (prune major water crossings)
+    # Step 4: Water barrier analysis (choose method)
     if transitability_params.get('remove_water_barriers', True):
-        connections = identify_water_crossings(
-            precincts, water_bodies, road_connections, base_graph,
-            water_threshold=transitability_params.get('water_threshold', 0.5)
-        )
+        water_method = transitability_params.get('water_method', 'centroid')
+        if water_method == 'boundary_with_road_exception':
+            connections = remove_water_edges_by_boundary_ratio_with_road_exception(
+                precincts,
+                water_bodies,
+                road_connections,
+                base_graph,
+                roads,
+                water_threshold=transitability_params.get('water_threshold', 0.75),
+                water_buffer_m=int(transitability_params.get('water_buffer_m', 150)),
+                side_buffer_m=int(transitability_params.get('road_boundary_buffer_m', 15)),
+            )
+        elif water_method == 'both':
+            centroid_conn = identify_water_crossings(
+                precincts, water_bodies, road_connections, base_graph,
+                water_threshold=transitability_params.get('water_threshold_centroid', transitability_params.get('water_threshold', 0.5))
+            )
+            boundary_conn = remove_water_edges_by_boundary_ratio_with_road_exception(
+                precincts,
+                water_bodies,
+                road_connections,
+                base_graph,
+                roads,
+                water_threshold=transitability_params.get('water_threshold_boundary', transitability_params.get('water_threshold', 0.75)),
+                water_buffer_m=int(transitability_params.get('water_buffer_m', 150)),
+                side_buffer_m=int(transitability_params.get('road_boundary_buffer_m', 15)),
+            )
+            connections = _combine_water_methods_union(centroid_conn, boundary_conn)
+        else:
+            connections = identify_water_crossings(
+                precincts, water_bodies, road_connections, base_graph,
+                water_threshold=transitability_params.get('water_threshold', 0.5)
+            )
     else:
         connections = road_connections
     
