@@ -6,8 +6,53 @@ import os
 import networkx as nx
 from gerrychain.proposals import recom
 from gerrychain.tree import bipartition_tree
-from gerrychain.constraints import contiguous, UpperBound
+from gerrychain.constraints import contiguous, UpperBound, Validator
 from gerrychain.updaters.locality_split_scores import LocalitySplits
+
+def assignment_hash(partition):
+    """
+    Updater that computes a hash of the partition's assignment.
+    The assignment is converted to a frozenset of (node, district) pairs to
+    ensure it is hashable and canonical (order-independent).
+    """
+    return hash(frozenset(partition.assignment.items()))
+
+
+class NotEqual(Validator):
+    """
+    A constraint that is satisfied if the proposed partition is not the same as
+    the partition it is being compared to (its parent). It uses a hash of the
+    assignment to perform this check efficiently.
+
+    Requires the `assignment_hash` updater to be active.
+    """
+    def __init__(self):
+        """
+        Initializes the NotEqual constraint.
+        """
+        pass
+
+    def __call__(self, partition):
+        """
+        Checks if the current partition's assignment hash is different from
+        its parent's.
+
+        :param partition: The proposed partition to check.
+        :return: True if the partition is different from its parent, False otherwise.
+        """
+        if partition.parent is None:
+            return True  # The initial partition is always valid
+
+        # The 'assignment_hash' must be in the updaters for this to work.
+        # This check provides a helpful error message if the updater is missing.
+        if "assignment_hash" not in partition.updaters:
+            raise KeyError(
+                "The 'NotEqual' constraint requires the 'assignment_hash' updater. "
+                "Please add it to your Partition's updaters."
+            )
+
+        return partition["assignment_hash"] != partition.parent["assignment_hash"]
+
 
 def create_graph(precincts, transitability_params=None):
     """Create GerryChain graph from precincts with optional transitability analysis or precomputed graph.
@@ -76,17 +121,10 @@ def create_graph(precincts, transitability_params=None):
                 graph.add_edge(u_coerced, v_coerced)
 
         print(f"Transitability graph: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
-        return graph
-
-    # 2) Build transitability-aware graph on the fly
-    if params.get('enable', False):
-        print("Applying transitability analysis...")
-        from .transitability import build_transitable_graph
-        graph = build_transitable_graph(precincts, params)
     else:
         graph = Graph.from_geodataframe(precincts)
+        print(f"Graph created with {len(graph.nodes)} nodes and {len(graph.edges)} edges")
 
-    print(f"Graph created with {len(graph.nodes)} nodes and {len(graph.edges)} edges")
     return graph
 
 def create_updaters(elections=[], election_columns=[], num_muniids=None, num_countyids=None):
@@ -119,6 +157,7 @@ def create_updaters(elections=[], election_columns=[], num_muniids=None, num_cou
             "num_split_localities", 0),
         "county_multi_splits": lambda p: p["county_locality_splits"].get(
             "num_parts", 0) - p["split_counties"] - num_countyids,
+        "assignment_hash": assignment_hash,
     }
 
     if len(elections) > 0:
@@ -162,7 +201,8 @@ def create_constraints(
     split_munis_constraint=None, 
     split_counties_constraint=None,
     muni_multi_splits_constraint=None,
-    county_multi_splits_constraint=None
+    county_multi_splits_constraint=None,
+    include_not_equal_constraint=True,
 ):
     """Create constraints according to Utah redistricting requirements."""
     print("Creating constraints...")
@@ -174,6 +214,10 @@ def create_constraints(
 
     constraints_list = [population_constraint, contiguity_constraint]
     
+    if include_not_equal_constraint:
+        constraints_list.append(NotEqual())
+        print("  Added NotEqual constraint to prevent redundant steps.")
+
     # Add municipality split constraint if specified
     if split_munis_constraint is not None:
         muni_constraint = UpperBound(get_muni_splits, split_munis_constraint)
