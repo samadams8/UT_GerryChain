@@ -8,122 +8,51 @@ from gerrychain.proposals import recom
 from gerrychain.tree import bipartition_tree
 from gerrychain.constraints import contiguous, UpperBound, Validator
 from gerrychain.updaters.locality_split_scores import LocalitySplits
-
-def assignment_hash(partition):
-    """
-    Updater that computes a hash of the partition's assignment.
-    The assignment is converted to a frozenset of (node, district) pairs to
-    ensure it is hashable and canonical (order-independent).
-    """
-    return hash(frozenset(partition.assignment.items()))
-
-
-class NotEqual(Validator):
-    """
-    A constraint that is satisfied if the proposed partition is not the same as
-    the partition it is being compared to (its parent). It uses a hash of the
-    assignment to perform this check efficiently.
-
-    Requires the `assignment_hash` updater to be active.
-    """
-    def __init__(self):
-        """
-        Initializes the NotEqual constraint.
-        """
-        pass
-
-    def __call__(self, partition):
-        """
-        Checks if the current partition's assignment hash is different from
-        its parent's.
-
-        :param partition: The proposed partition to check.
-        :return: True if the partition is different from its parent, False otherwise.
-        """
-        if partition.parent is None:
-            return True  # The initial partition is always valid
-
-        # The 'assignment_hash' must be in the updaters for this to work.
-        # This check provides a helpful error message if the updater is missing.
-        if "assignment_hash" not in partition.updaters:
-            raise KeyError(
-                "The 'NotEqual' constraint requires the 'assignment_hash' updater. "
-                "Please add it to your Partition's updaters."
-            )
-
-        return partition["assignment_hash"] != partition.parent["assignment_hash"]
-
+from gerrychain.metrics import polsby_popper
 
 def create_graph(precincts, transitability_params=None):
-    """Create GerryChain graph from precincts with optional transitability analysis or precomputed graph.
-
-    If `transitability_params` contains `precomputed_path`, this function will attempt to load a
-    precomputed transitability-aware graph from disk. Supported formats:
-      - GraphML (file extension .graphml)
-      - JSON edge list (file extension .json) with objects {"source": u, "target": v}
-
-    Otherwise, if `enable` is true, it will build the graph on the fly using transitability.
-    Fallback is a standard adjacency graph from the precinct geometries.
-    """
+    """Create GerryChain graph from precincts with optional transitability analysis or precomputed graph."""
     print("Creating graph...")
-
     params = transitability_params or {}
-
-    # 1) Load precomputed graph if provided
     precomputed_path = params.get("precomputed_path")
+
+    # Always start with the graph from geodataframe, which has all attributes.
+    graph = Graph.from_geodataframe(precincts, reproject=False)
+    print(f"Base graph: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
+
+    # If a precomputed transitability graph is provided, prune the base graph.
     if precomputed_path:
         if not os.path.exists(precomputed_path):
             raise FileNotFoundError(f"Precomputed graph not found: {precomputed_path}")
-        print(f"Loading precomputed transitability edges from {precomputed_path}...")
-
-        # Start with the precincts graph (has all node attributes)
-        graph = Graph.from_geodataframe(precincts)
-        print(f"Base graph: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
-
-        # Load the transitability edges
+        
+        print(f"Loading transitability edges from {precomputed_path}...")
         ext = os.path.splitext(precomputed_path)[1].lower()
         transitability_edges = []
 
-        if ext == ".graphml":
-            nx_graph = nx.read_graphml(precomputed_path)
-            transitability_edges = list(nx_graph.edges())
-        elif ext == ".json":
-            # Expect an edge list JSON: [{"source": u, "target": v}, ...]
+        if ext == ".json":
             import json
             with open(precomputed_path, "r") as f:
                 edge_list = json.load(f)
             for e in edge_list:
-                u = e.get("source")
-                v = e.get("target")
+                u, v = e.get("source"), e.get("target")
                 if u is not None and v is not None:
-                    transitability_edges.append((u, v))
+                    transitability_edges.append((int(u), int(v)))
         else:
             raise ValueError(f"Unsupported precomputed graph format: {ext}")
-
-        # Convert node labels to match precincts index
-        def coerce_node(n):
-            try:
-                return int(n)
-            except Exception:
-                return n
-
-        # Replace edges with transitability edges
-        print("Applying transitability edges...")
-        # Clear existing edges
-        graph.clear_edges()
         
-        # Add transitability edges
-        for u, v in transitability_edges:
-            u_coerced = coerce_node(u)
-            v_coerced = coerce_node(v)
-            # Only add edge if both nodes exist in the graph
-            if u_coerced in graph.nodes and v_coerced in graph.nodes:
-                graph.add_edge(u_coerced, v_coerced)
-
-        print(f"Transitability graph: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
+        # Create a set of allowed edges for fast lookups
+        allowed_edges = {tuple(sorted(e)) for e in transitability_edges}
+        
+        # Prune edges not in the transitability set
+        edges_to_remove = []
+        for u, v in graph.edges:
+            if tuple(sorted((u, v))) not in allowed_edges:
+                edges_to_remove.append((u, v))
+        
+        graph.remove_edges_from(edges_to_remove)
+        print(f"Pruned to transitability graph: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
     else:
-        graph = Graph.from_geodataframe(precincts)
-        print(f"Graph created with {len(graph.nodes)} nodes and {len(graph.edges)} edges")
+        print(f"Using default adjacency graph created with {len(graph.nodes)} nodes and {len(graph.edges)} edges")
 
     return graph
 
@@ -158,6 +87,7 @@ def create_updaters(elections=[], election_columns=[], num_muniids=None, num_cou
         "county_multi_splits": lambda p: p["county_locality_splits"].get(
             "num_parts", 0) - p["split_counties"] - num_countyids,
         "assignment_hash": assignment_hash,
+        "polsby_popper": lambda p: polsby_popper(p),
     }
 
     if len(elections) > 0:
@@ -244,14 +174,12 @@ def create_constraints(
 
     return constraints_list
 
-
 def get_muni_splits(partition):
     """Extract municipality split count (num_split_localities) from partition."""
     try:
         return int(partition["split_munis"])  # central updater
     except Exception:
         return 0
-
 
 def get_muni_multi_splits(partition):
     """Extract municipality multi-splits (num_parts - num_split_localities - total_munis) from partition."""
@@ -260,7 +188,6 @@ def get_muni_multi_splits(partition):
     except Exception:
         return 0
 
-
 def get_county_splits(partition):
     """Extract county split count (num_split_localities) from partition."""
     try:
@@ -268,14 +195,12 @@ def get_county_splits(partition):
     except Exception:
         return 0
 
-
 def get_county_multi_splits(partition):
     """Extract county multi-splits (num_parts - num_split_localities - total_counties) from partition."""
     try:
         return int(partition["county_multi_splits"])  # central updater
     except Exception:
         return 0
-
 
 def create_proposal(ideal_population, precincts, region_surcharge_params):
     """Create ReCom proposal with region surcharges.
@@ -324,4 +249,45 @@ def create_proposal(ideal_population, precincts, region_surcharge_params):
     print(f"Region surcharges: {region_surcharge}")
     return proposal
 
+def assignment_hash(partition):
+    """
+    Updater that computes a hash of the partition's assignment.
+    The assignment is converted to a frozenset of (node, district) pairs to
+    ensure it is hashable and canonical (order-independent).
+    """
+    return hash(frozenset(partition.assignment.items()))
 
+class NotEqual(Validator):
+    """
+    A constraint that is satisfied if the proposed partition is not the same as
+    the partition it is being compared to (its parent). It uses a hash of the
+    assignment to perform this check efficiently.
+
+    Requires the `assignment_hash` updater to be active.
+    """
+    def __init__(self):
+        """
+        Initializes the NotEqual constraint.
+        """
+        pass
+
+    def __call__(self, partition):
+        """
+        Checks if the current partition's assignment hash is different from
+        its parent's.
+
+        :param partition: The proposed partition to check.
+        :return: True if the partition is different from its parent, False otherwise.
+        """
+        if partition.parent is None:
+            return True  # The initial partition is always valid
+
+        # The 'assignment_hash' must be in the updaters for this to work.
+        # This check provides a helpful error message if the updater is missing.
+        if "assignment_hash" not in partition.updaters:
+            raise KeyError(
+                "The 'NotEqual' constraint requires the 'assignment_hash' updater. "
+                "Please add it to your Partition's updaters."
+            )
+
+        return partition["assignment_hash"] != partition.parent["assignment_hash"]

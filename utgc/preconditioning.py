@@ -126,6 +126,7 @@ def run_preconditioning(
                 print(f"Inferred initial region surcharges from proposal: {region_surcharge_params}")
         except Exception:
             pass
+
     for attempt in range(max_attempts):
         if attempt > 0:
             print(f"Retrying preconditioning (attempt {attempt + 1}/{max_attempts})...")
@@ -141,9 +142,8 @@ def run_preconditioning(
         if attempt == 0:
             print("Starting preconditioning...")
 
-        for i, partition in enumerate(
-            optimizer.short_bursts(5, ceil(steps / 5), with_progress_bar=True)
-        ):
+        for _ in optimizer.short_bursts(
+            5, ceil(steps / 5), with_progress_bar=True):
             pass
 
         print(f"Preconditioned score: {optimizer.best_score}")
@@ -156,13 +156,13 @@ def run_preconditioning(
         
         # Get multi-splits from central updaters
         try:
-            muni_multi_splits = int(optimized_partition["muni_multi_splits"]) if "muni_multi_splits" in optimized_partition.updaters else 0
-        except Exception:
+            muni_multi_splits = int(optimized_partition["muni_multi_splits"])
+        except (KeyError, TypeError):
             muni_multi_splits = 0
         
         try:
-            county_multi_splits = int(optimized_partition["county_multi_splits"]) if "county_multi_splits" in optimized_partition.updaters else 0
-        except Exception:
+            county_multi_splits = int(optimized_partition["county_multi_splits"])
+        except (KeyError, TypeError):
             county_multi_splits = 0
 
         # Report which municipalities and counties are split and multi-split
@@ -272,4 +272,3 @@ def run_preconditioning(
 
     print(f"⚠️  WARNING: Preconditioning failed to meet tolerance requirements after {max_attempts} attempts")
     return optimized_partition
-
