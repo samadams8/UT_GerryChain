@@ -1,8 +1,15 @@
 **/.DS_Store
 results/*
-data/*
+data/cois/*
+data/disagg/*
+data/geography/*
+data/raw/*
+data/geography_processed/*
+data/UT_blocks.geojson
+data/UT_precincts.geojson
 output/
 todos.md
+*.png
 
 # Python venv and cache
 .venv/

@@ -1,0 +1,28 @@
+cli_args:
+  boundary_road_buffer_m: 150
+  boundary_threshold: 0.33
+  boundary_water_buffer_m: 150
+  centroid_threshold: 0.1
+  lakes: data/geography_processed/UtahMajorLakes_filtered.shp
+  out_dir: data/transitability/_border_repaired/
+  precincts: data/UT_precincts.geojson
+  prune_roads: true
+  prune_water_border: true
+  prune_water_centroid: false
+  rivers: data/geography_processed/UtahMajorRivers_filtered.shp
+  road_buffer_m: 500
+  roads: data/geography_processed/UtahRoads_filtered.shp
+parameters:
+  lakes_path: data/geography_processed/UtahMajorLakes_filtered.shp
+  remove_water_barriers: true
+  rivers_path: data/geography_processed/UtahMajorRivers_filtered.shp
+  road_boundary_buffer_m: 150
+  road_buffer_meters: 500
+  roads_path: data/geography_processed/UtahRoads_filtered.shp
+  verify_road_connectivity: true
+  water_buffer_m: 150
+  water_method: boundary_with_road_exception
+  water_threshold: 0.33
+  water_threshold_centroid: 0.1
+precincts: data/UT_precincts.geojson
+timestamp: '2025-10-09T20:25:56.213832'
