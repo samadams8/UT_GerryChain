@@ -328,7 +328,7 @@ def _union_buffered_water_single(water_bodies: gpd.GeoDataFrame, buffer_m: float
     wb = water_bodies.copy()
     if buffer_m and buffer_m > 0:
         wb["geometry"] = wb.geometry.buffer(buffer_m)
-    return wb.unary_union
+    return wb.union_all()
 
 def _has_direct_road_bridge(
     boundary_geom,
@@ -632,14 +632,13 @@ def build_transitable_graph(
         else:
             connections = identify_water_crossings(
                 precincts, water_bodies, road_connections, base_graph,
-                water_threshold=transitability_params.get('water_threshold', 0.5)
+                water_threshold=transitability_params.get('water_threshold_centroid', 0.5)
             )
     else:
         connections = road_connections
     
     # Step 5: Hierarchical fallback (connect orphaned precincts to same-county neighbors)
-    if transitability_params.get('verify_road_connectivity', True):
-        connections = apply_hierarchical_fallback(precincts, connections, base_graph)
+    connections = apply_hierarchical_fallback(precincts, connections, base_graph)
     
     # Step 6: Build final graph
     final_graph = Graph()

@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""Wrapper CLI: build transitability-aware graph via utgc.transitability and export artifacts.
+"""Wrapper CLI: build transitability-aware graph, repair connectivity, and export artifacts.
 
 Outputs to data/transitability (by default):
-- transitability_graph_nodes.parquet (node_id)
-- transitability_graph_edges.parquet (u,v)
 - transitability.graphml
 - transitability.json
 - metadata.yaml
@@ -14,12 +12,12 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Set, Tuple
 import sys
 
 import geopandas as gpd
+import pandas as pd
 import yaml
-
 import networkx as nx
 
 # Ensure project root is on sys.path for absolute imports
@@ -29,133 +27,258 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from utgc.transitability import build_transitable_graph  # type: ignore
 
-
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Build transitability artifacts (wrapper)")
-    p.add_argument("--precincts", default="data/UT_precincts.geojson")
-    p.add_argument("--out-dir", default="data/transitability")
-    # Parameters passed to utgc.transitability.build_transitable_graph
-    p.add_argument("--enable", action="store_true", help="Enable transitability modifications")
-    p.add_argument("--remove-water-barriers", dest="remove_water_barriers", action="store_true", help="Prune major water crossings")
-    p.add_argument("--no-remove-water-barriers", dest="remove_water_barriers", action="store_false")
-    p.set_defaults(remove_water_barriers=True)
-    p.add_argument("--verify-road-connectivity", dest="verify_road_connectivity", action="store_true", help="Apply road connectivity checks")
-    p.add_argument("--no-verify-road-connectivity", dest="verify_road_connectivity", action="store_false")
-    p.set_defaults(verify_road_connectivity=True)
-    p.add_argument("--road-buffer-meters", type=float, default=500.0)
-    p.add_argument("--water-threshold", type=float, default=0.5)
-    p.add_argument("--export-formats", default="parquet,graphml,json")
-    p.add_argument("--verbose", action="store_true", help="Print detailed progress information")
+    """Parses command-line arguments for the script."""
+    p = argparse.ArgumentParser(
+        description="Build and repair transitability artifacts (wrapper)",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    p.add_argument("--precincts", default="data/UT_precincts.geojson", help="Path to precincts GeoJSON file.")
+    p.add_argument("--out-dir", default="data/transitability", help="Directory to save output artifacts.")
+
+    # Create a dedicated group for transitability options for clarity in the --help message.
+    trans_group = p.add_argument_group("Transitability Pruning Options")
+    
+    # Road-based pruning arguments
+    trans_group.add_argument("--prune-roads", action="store_true", help="Enable pruning of edges not connected by the road network.")
+    trans_group.add_argument("--road-buffer-m", type=int, default=500, help="Buffer around roads in meters for road connectivity checks.")
+    trans_group.add_argument("--roads", default="data/geography_processed/UtahRoads_filtered.shp", help="Path to roads shapefile for road-based pruning.")
+
+    # Water-based pruning arguments
+    trans_group.add_argument("--prune-water-centroid", action="store_true", help="Enable pruning of edges where the centroid-connecting line crosses a major water body.")
+    trans_group.add_argument("--centroid-threshold", type=float, default=0.1, help="Proportion of centroid-connecting line allowed to cross water (0 to 1).")
+    
+    trans_group.add_argument("--prune-water-border", action="store_true", help="Enable pruning of edges where the shared border is a major water body.")
+    trans_group.add_argument("--boundary-threshold", type=float, default=0.75, help="Proportion of shared border allowed to be water for border method (0 to 1).")
+    trans_group.add_argument("--boundary-water-buffer-m", type=int, default=150, help="Buffer around water bodies in meters for border method.")
+    trans_group.add_argument("--boundary-road-buffer-m", type=int, default=150, help="Buffer around roads in meters for border method.")
+    
+    trans_group.add_argument("--lakes", default="data/geography_processed/UtahMajorLakes_filtered.shp", help="Path to lakes shapefile for water-based pruning.")
+    trans_group.add_argument("--rivers", default="data/geography_processed/UtahMajorRivers_filtered.shp", help="Path to rivers shapefile for water-based pruning.")
+    
     return p.parse_args()
 
+def export_artifacts(graph: nx.Graph, out_dir: Path, precincts: str, params: Dict, args: argparse.Namespace) -> Tuple[Path, Path]:
+    out_dir.mkdir(exist_ok=True)
+    gml_path = out_dir / "transitability.graphml"
+    json_path = out_dir / "transitability.json"
 
-def write_metadata(out_dir: Path, precincts: gpd.GeoDataFrame, params: Dict, args: argparse.Namespace) -> None:
+    # Create a copy of the graph for exporting to avoid modifying the original.
+    graph_to_export = graph.copy()
+
+    # The GraphML writer cannot serialize complex objects like Shapely geometries.
+    # We must remove them from node attributes before exporting.
+    for node, data in graph_to_export.nodes(data=True):
+        if 'geometry' in data:
+            del data['geometry']
+
+    # Export the cleaned graph
+    nx.write_graphml(graph_to_export, gml_path)
+    
+    edges = [{"source": u, "target": v} for u, v in graph.edges()]
+    with open(json_path, "w") as f:
+        import json
+        json.dump(edges, f)
+
+    # Export metadata
     meta = {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-        "crs": str(precincts.crs),
-        "params": params,
-        "inputs": {
-            "precincts": str(Path(args.precincts).resolve()),
-        },
+        "timestamp": datetime.now().isoformat(),
+        "precincts": precincts,
+        "parameters": params,
+        "cli_args": vars(args),
     }
-    out_dir.mkdir(parents=True, exist_ok=True)
     with open(out_dir / "metadata.yaml", "w") as f:
-        yaml.safe_dump(meta, f, sort_keys=False)
+        yaml.dump(meta, f, default_flow_style=False)
+    
+    return gml_path, json_path
+
+def repair_connectivity(graph_to_repair: nx.Graph, base_adj_graph: nx.Graph, node_subset: List[int]) -> Set[Tuple[int, int]]:
+    """
+    Checks connectivity of a node subset and adds edges from the base graph to connect it.
+    
+    Args:
+        graph_to_repair: The graph that may have disconnected components.
+        base_adj_graph: The fully connected adjacency graph to source repair edges from.
+        node_subset: The list of nodes to check for connectivity.
+    
+    Returns:
+        A set of edges that were added to repair the graph.
+    """
+    if not node_subset or len(node_subset) <= 1:
+        return set()
+
+    subgraph = graph_to_repair.subgraph(node_subset)
+    if nx.is_connected(subgraph):
+        return set()
+
+    added_edges = set()
+    components = list(nx.connected_components(subgraph))
+    
+    print(f"  - Found {len(components)} disconnected components. Attempting to repair.")
+    for i, component in enumerate(components):
+        print(f"    - Component {i+1} ({len(component)} nodes): {sorted(list(component))}")
+
+    main_component = components[0]
+    
+    for i in range(1, len(components)):
+        component_to_connect = components[i]
+        connection_found = False
+        
+        for u in main_component:
+            for v in base_adj_graph.neighbors(u):
+                if v in component_to_connect:
+                    graph_to_repair.add_edge(u, v)
+                    added_edges.add(tuple(sorted((u, v))))
+                    print(f"    - Connecting components by adding edge: ({u}, {v})")
+                    connection_found = True
+                    break
+            if connection_found:
+                break
+        
+        if not connection_found:
+             print(f"    - WARNING: Could not find a direct adjacency to connect component {i}. The graph may remain disconnected.")
+        else:
+            newly_connected_graph = graph_to_repair.subgraph(node_subset)
+            for comp in nx.connected_components(newly_connected_graph):
+                if main_component.issubset(comp):
+                    main_component = comp
+                    break
+                    
+    return added_edges
 
 
-def main() -> int:
+def main():
     args = parse_args()
     out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load precincts
-    precincts = gpd.read_file(args.precincts)
-    if args.verbose:
-        print(f"Loaded {len(precincts):,} precincts from {args.precincts}")
+    # Merge CLI arguments to feed to API
+    if args.prune_water_centroid and args.prune_water_border:
+        water_method = 'both'
+    elif args.prune_water_border:
+        water_method = 'boundary_with_road_exception'
+    elif args.prune_water_centroid:
+        water_method = 'centroid'
 
-    # Build transitability-aware graph
-    params: Dict = {
-        "enable": bool(args.enable or True),
-        "remove_water_barriers": bool(args.remove_water_barriers),
-        "verify_road_connectivity": bool(args.verify_road_connectivity),
-        "road_buffer_meters": float(args.road_buffer_meters),
-        "water_threshold": float(args.water_threshold),
-        # Use combined method (union of removals) as requested
-        "water_method": "both",
-        # Separate thresholds: centroid=0.1, boundary=0.75
-        "water_threshold_centroid": 0.1,
-        "water_threshold_boundary": 0.75,
-        "water_buffer_m": 150,
-        "road_boundary_buffer_m": 15,
+    # Map the user-friendly CLI arguments to the specific parameter names
+    # expected by the `build_transitable_graph` function in the API.
+    params = {
+        "verify_road_connectivity": args.prune_roads,
+        "road_buffer_meters": args.road_buffer_m,
+        "roads_path": args.roads,
+        "remove_water_barriers": args.prune_water_centroid or args.prune_water_border,
+        "water_method": water_method,
+        "water_threshold_centroid": args.centroid_threshold,
+        "water_threshold": args.boundary_threshold,
+        "water_buffer_m": args.boundary_water_buffer_m,
+        "road_boundary_buffer_m": args.boundary_road_buffer_m,
+        "lakes_path": args.lakes,
+        "rivers_path": args.rivers,
     }
-    if args.verbose:
-        print("Transitability params:")
-        for k, v in params.items():
-            print(f"  {k}: {v}")
 
-    graph = build_transitable_graph(precincts, transitability_params=params)
-    if args.verbose:
-        print(f"Graph built: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
+    # Build the base graph from simple adjacency first. This will be our
+    # reference for all possible connections.
+    print("Building base adjacency graph...")
+    precincts = gpd.read_file(args.precincts)
+    # Reset index to ensure it is a clean 0-n integer range.
+    precincts = precincts.reset_index(drop=True)
 
-    # Export nodes/edges parquet (disabled per request)
-    # nodes_path = out_dir / "transitability_graph_nodes.parquet"
-    # edges_path = out_dir / "transitability_graph_edges.parquet"
-    # import pandas as pd
-    # pd.DataFrame({"node_id": list(graph.nodes())}).to_parquet(nodes_path)
-    # pd.DataFrame([(u, v) for u, v in graph.edges()], columns=["u", "v"]).to_parquet(edges_path)
+    # Perform the spatial join. The resulting index is from the left gdf,
+    # and a new 'index_right' column is added from the right gdf.
+    adjacencies = gpd.sjoin(precincts, precincts, predicate='intersects', how='left')
 
-    # Export GraphML and JSON edge list
-    # Sanitize graph attributes: GraphML cannot serialize shapely geometries or complex objects.
-    simple_graph = nx.Graph()
-    simple_graph.add_nodes_from(list(graph.nodes()))
-    simple_graph.add_edges_from(list(graph.edges()))
-    gml_path = out_dir / "transitability.graphml"
-    nx.write_graphml(simple_graph, gml_path)
-    json_path = out_dir / "transitability.json"
-    import json
-    with open(json_path, "w") as f:
-        json.dump([{ "source": int(u), "target": int(v)} for u, v in simple_graph.edges()], f)
+    # Create a clean DataFrame for the edgelist.
+    edge_df = pd.DataFrame({
+        "source": adjacencies.index,
+        "target": adjacencies["index_right"]
+    })
 
-    # Metadata
-    write_metadata(out_dir, precincts, params, args)
+    # Create the graph from this reliable edgelist.
+    base_graph = nx.from_pandas_edgelist(edge_df)
+    base_graph.remove_edges_from(nx.selfloop_edges(base_graph))
+
+    # Determine if any transitability modifications should be made.
+    is_transitability_enabled = args.prune_roads or args.prune_water_centroid or args.prune_water_border
+    
+    print("\nBuilding transitability-aware graph...")
+    if is_transitability_enabled:
+        # Build the graph that may have edges removed due to transitability rules.
+        precincts_gdf = gpd.read_file(args.precincts)
+        graph = build_transitable_graph(precincts_gdf, params)
+    else:
+        print("No transitability pruning options selected. Using base adjacency graph.")
+        # If not enabled, the graph to check is just the base graph.
+        graph = base_graph.copy()
+
+
+    # --- GRAPH REPAIR AND VERIFICATION ---
+    print("\nVerifying and repairing graph connectivity...")
+    
+    # 1. Map nodes to counties for county-level checks
+    county_col = 'COUNTY' # Adjust if your GeoJSON uses a different column name
+    if county_col not in precincts.columns:
+        raise ValueError(f"Could not find county column '{county_col}' in precincts file.")
+
+    nodes_by_county = precincts.groupby(county_col).groups
+    total_repaired_edges = set()
+
+    # 2. Repair connectivity for each county individually
+    for county, nodes in nodes_by_county.items():
+        node_list = list(nodes)
+        if len(node_list) <= 1:
+            continue
+        
+        print(f"Checking county: {county} ({len(node_list)} nodes)")
+        repaired_edges = repair_connectivity(graph, base_graph, node_list)
+        total_repaired_edges.update(repaired_edges)
+
+    # 3. Repair connectivity for the entire state graph
+    print("\nChecking statewide connectivity...")
+    all_nodes = list(graph.nodes)
+    repaired_edges = repair_connectivity(graph, base_graph, all_nodes)
+    total_repaired_edges.update(repaired_edges)
+
+    if total_repaired_edges:
+        print(f"\nRepair complete. Added a total of {len(total_repaired_edges)} edge(s) to ensure connectivity.")
+    else:
+        print("\nGraph connectivity checks passed. No repairs needed.")
+
+    # --- FINAL POST-REPAIR TESTS ---
+    print("\nRunning final post-repair connectivity tests...")
+    fully_connected = nx.is_connected(graph)
+    print(f"Connected (entire graph): {fully_connected}")
+    if not fully_connected:
+        print("WARNING: Entire graph is still not connected after repair.")
+        components = list(nx.connected_components(graph))
+        print(f"  - Found {len(components)} statewide components.")
+        for i, component in enumerate(components):
+            node_list = sorted(list(component))
+            sample = f"{node_list[:10]}..." if len(node_list) > 10 else node_list
+            print(f"    - Component {i+1} ({len(node_list)} nodes): {sample}")
+
+    all_counties_connected = True
+    for county, nodes in nodes_by_county.items():
+        node_list = list(nodes)
+        if len(node_list) <= 1:
+            continue
+        sub = graph.subgraph(node_list)
+        if not nx.is_connected(sub):
+            all_counties_connected = False
+            print(f"WARNING: County '{county}' not connected after repair.")
+            components = list(nx.connected_components(sub))
+            for i, component in enumerate(components):
+                 print(f"  - Component {i+1} ({len(component)} nodes): {sorted(list(component))}")
+    print(f"Connected (each county): {all_counties_connected}")
+
+
+    # --- EXPORT ARTIFACTS ---
+    print("\nExporting artifacts...")
+    gml_path, json_path = export_artifacts(graph, out_dir, args.precincts, params, args)
 
     print("Artifacts:")
     print(f"  - graphml: {gml_path}")
     print(f"  - json: {json_path}")
     print(f"  - metadata: {out_dir / 'metadata.yaml'}")
 
-    # Post-export tests
-    try:
-        fully_connected = nx.is_connected(graph)
-        print(f"Connected (entire graph): {fully_connected}")
-        # County connectivity test
-        precincts_df = gpd.read_file(args.precincts)
-        county_connected = True
-        if 'COUNTYID' in precincts_df.columns:
-            precincts_df = precincts_df[['COUNTYID']].copy()
-            # Map node -> county
-            county_map = {}
-            for n in graph.nodes:
-                try:
-                    county_map[n] = precincts_df.loc[n, 'COUNTYID']
-                except Exception:
-                    county_map[n] = None
-            counties = sorted(set(v for v in county_map.values() if v is not None))
-            for c in counties:
-                nodes_c = [n for n, v in county_map.items() if v == c]
-                if len(nodes_c) <= 1:
-                    continue
-                sub = graph.subgraph(nodes_c)
-                if not nx.is_connected(sub):
-                    county_connected = False
-                    print(f"County not connected: {c} ({len(nodes_c)} nodes)")
-        print(f"Connected (each county): {county_connected}")
-    except Exception as e:
-        print(f"Post-export tests failed: {e}")
-    return 0
-
-
 if __name__ == "__main__":
-    raise SystemExit(main())
-
+    main()
 
