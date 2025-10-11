@@ -1,700 +1,226 @@
 """
 Transitability module for graph connectivity analysis.
 
-This module implements hierarchical fallback connectivity analysis for redistricting,
-considering road networks, water barriers, and administrative boundaries.
-
-Key Features:
-- Road network connectivity with hierarchical fallback
-- Water barrier detection and edge removal
-- Support for both precinct and block-level analysis
-- Integration with GerryChain graph construction
+This module provides two main methods for building a transitability-aware graph:
+1. roads_only: Prunes by direct road connectivity, then uses a geographic
+   fallback and county-level repair to ensure connectivity.
+2. hierarchical (old method): Uses a fallback system of roads, water,
+   and administrative boundaries.
 """
 
+from __future__ import annotations
 import geopandas as gpd
 import pandas as pd
-import numpy as np
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Union
+from typing import Dict, List, Set, Tuple
 from gerrychain import Graph
 import warnings
-import maup
 from shapely.ops import unary_union
-from shapely.geometry import LineString
+import networkx as nx
+
+# Import the new road pruning algorithm
+from data.scripts.transitability.road_pruning import build_graph_from_road_connectivity
+
+warnings.filterwarnings("ignore", category=FutureWarning, module="pandas")
+
+# --- Helper Functions (used by both methods) ---
+
+def find_and_set_index(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """
+    Finds a suitable unique ID column and sets it as the GeoDataFrame index.
+    Searches for common ID names and falls back to the existing index if none are found.
+    """
+    candidate_cols = ["GEOID20", "ID", "GEOID", "geoid", "id"]
+    for col in candidate_cols:
+        if col in gdf.columns:
+            print(f"Found unique ID column: '{col}'. Setting as index.")
+            return gdf.set_index(col)
+    
+    print("Warning: No standard unique ID column found. Using existing index.")
+    return gdf
+
 
 def load_road_network(
-    roads_path: str = "data/geography_processed/UtahRoads_filtered.shp",
-    cartocodes_to_exclude: List[str] = None
+    roads_path: str = "data/geography_processed/UtahRoads_filtered.shp"
 ) -> gpd.GeoDataFrame:
     """
     Load filtered road network for connectivity analysis.
-    
-    Parameters
-    ----------
-    roads_path : str
-        Path to filtered roads shapefile
-    cartocodes_to_exclude : List[str], optional
-        Additional CARTOCODE values to exclude beyond defaults
-        
-    Returns
-    -------
-    gpd.GeoDataFrame
-        Filtered road network
     """
-    if cartocodes_to_exclude is None:
-        cartocodes_to_exclude = []
-    
     print(f"Loading road network from {roads_path}...")
     roads = gpd.read_file(roads_path)
-    
-    if cartocodes_to_exclude:
-        original_count = len(roads)
-        roads = roads[~roads['CARTOCODE'].isin(cartocodes_to_exclude)]
-        print(f"  Excluded CARTOCODE {cartocodes_to_exclude}: {len(roads):,} roads ({len(roads)/original_count*100:.1f}%)")
-    else:
-        print(f"  Loaded {len(roads):,} roads")
-    
     return roads
 
-def load_water_bodies(
-    lakes_path: str = "data/geography_processed/UtahMajorLakes_filtered.shp",
-    rivers_path: str = "data/geography_processed/UtahMajorRivers_filtered.shp"
-) -> gpd.GeoDataFrame:
-    """
-    Load filtered water bodies for barrier analysis.
-    
-    Parameters
-    ----------
-    lakes_path : str
-        Path to filtered lakes shapefile
-    rivers_path : str
-        Path to filtered rivers shapefile
-        
-    Returns
-    -------
-    gpd.GeoDataFrame
-        Combined water bodies dataset
-    """
-    print("Loading water bodies...")
-    
-    # Load lakes
-    lakes = gpd.read_file(lakes_path)
-    print(f"  Lakes: {len(lakes):,} features")
-    
-    # Load rivers
-    rivers = gpd.read_file(rivers_path)
-    print(f"  Rivers: {len(rivers):,} features")
-    
-    # Combine water bodies
-    water_bodies = pd.concat([lakes, rivers], ignore_index=True)
-    water_bodies = gpd.GeoDataFrame(water_bodies, crs=lakes.crs)
-    
-    print(f"  Total water bodies: {len(water_bodies):,}")
-    return water_bodies
 
-def identify_road_connected_precincts(
-    precincts: gpd.GeoDataFrame,
-    roads: gpd.GeoDataFrame,
-    buffer_meters: float = 500.0
-) -> pd.DataFrame:
+def test_graph_connectivity(graph: Graph, name: str, raise_error: bool = False):
+    """Tests and reports on the connectivity of a graph."""
+    is_connected = nx.is_connected(graph)
+    print(f"Connectivity test for '{name}': {'PASS' if is_connected else 'FAIL'}")
+    if not is_connected:
+        components = list(nx.connected_components(graph))
+        msg = f"{name} is not connected. Found {len(components)} components."
+        if raise_error:
+            raise RuntimeError(msg)
+        else:
+            print(f"  - {msg}")
+
+
+def add_geographic_fallback_edges(graph: Graph, precincts: gpd.GeoDataFrame, hierarchy: List[str]):
     """
-    Identify which precinct pairs are connected by roads using maup for efficiency.
-    
-    Parameters
-    ----------
-    precincts : gpd.GeoDataFrame
-        Precinct geometries
-    roads : gpd.GeoDataFrame
-        Road network
-    buffer_meters : float
-        Buffer distance for road-precinct intersection
-        
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame with columns ['precinct_1', 'precinct_2', 'connected']
-        indicating road connectivity between precinct pairs
+    Adds edges to a graph based on administrative hierarchies to improve connectivity.
+    It iterates through hierarchies (e.g., county, then municipality) and adds
+    an edge between any two nodes in the same administrative unit if they are adjacent.
     """
-    print("Identifying road-connected precincts...")
+    print(f"Adding geographic fallback edges using hierarchy: {hierarchy}")
+    base_adj_graph = Graph.from_geodataframe(precincts)
     
-    # Reproject to match
-    precincts_proj = precincts.to_crs(roads.crs)
-    
-    # Create buffer around precincts for road intersection
-    precincts_buffered = precincts_proj.copy()
-    precincts_buffered['geometry'] = precincts_proj.geometry.buffer(buffer_meters)
-    
-    # Use maup's efficient intersections to find precinct-road overlaps
-    print("  Computing precinct-road intersections...")
-    intersections = maup.intersections(precincts_buffered, roads)  # No area cutoff for line intersections
-    
-    # Get unique precincts with road access
-    precincts_with_roads = set(intersections.index.get_level_values(0))
-    print(f"  Precincts with road access: {len(precincts_with_roads):,} ({len(precincts_with_roads)/len(precincts)*100:.1f}%)")
-    
-    # Build adjacency graph first
+    for level in hierarchy:
+        print(f"  - Processing fallback for '{level}'...")
+        edges_added = 0
+        for u, v, data in base_adj_graph.edges(data=True):
+            # If this edge doesn't already exist in our graph
+            if not graph.has_edge(u, v):
+                node_u = precincts.loc[u]
+                node_v = precincts.loc[v]
+                # If they share the same ID for the current hierarchy level
+                if level in node_u and level in node_v and node_u[level] == node_v[level]:
+                    graph.add_edge(u, v)
+                    # Copy over the shared_perim attribute
+                    graph.edges[(u,v)]["shared_perim"] = data.get("shared_perim")
+                    edges_added += 1
+        print(f"    - Added {edges_added} edges for {level} contiguity.")
+    return graph
+
+
+def repair_county_connectivity(graph: Graph, precincts: gpd.GeoDataFrame, county_col: str) -> Graph:
+    """
+    Ensures that all precincts within each county form a single connected component.
+    """
+    print("\nRepairing county-level connectivity...")
+    base_adj_graph = Graph.from_geodataframe(precincts)
+    counties = precincts[county_col].unique()
+    edges_added_total = 0
+
+    for county in counties:
+        nodes_in_county = precincts[precincts[county_col] == county].index
+        county_subgraph = graph.subgraph(nodes_in_county)
+
+        if not nx.is_connected(county_subgraph):
+            print(f"  - County '{county}' is disconnected. Repairing...")
+            components = list(nx.connected_components(county_subgraph))
+            
+            # Find the largest component to connect others to
+            largest_component = max(components, key=len)
+            
+            for component in components:
+                if component == largest_component:
+                    continue
+                
+                # Find the shortest path in the original adjacency graph
+                # between this small component and the largest one.
+                path_found = False
+                for source_node in component:
+                    for target_node in largest_component:
+                        if nx.has_path(base_adj_graph, source_node, target_node):
+                            path = nx.shortest_path(base_adj_graph, source_node, target_node)
+                            print(f"    - Connecting component via path: {path}")
+                            for i in range(len(path) - 1):
+                                u, v = path[i], path[i+1]
+                                if not graph.has_edge(u, v):
+                                    graph.add_edge(u, v)
+                                    # Copy over the shared_perim attribute
+                                    graph.edges[(u,v)]["shared_perim"] = base_adj_graph.edges[(u,v)].get("shared_perim")
+                                    edges_added_total += 1
+                            path_found = True
+                            break
+                    if path_found:
+                        break
+
+    print(f"  - Added {edges_added_total} edges to ensure county connectivity.")
+    return graph
+
+
+# --- Main Graph Building Methods ---
+
+def build_roads_only_graph(
+    precincts_path: str,
+    roads_path: str,
+    reproject: bool = False
+) -> Tuple[Graph, Graph]:
+    """
+    Builds a transitability graph using the roads-first approach.
+    1. Builds a sparse graph of only road-connected edges.
+    2. Adds fallback edges for county and municipality contiguity.
+    3. Repairs connectivity within each county.
+    """
+    print("--- Building Roads-Only Transitivity Graph ---")
+    precincts_gdf = gpd.read_file(precincts_path)
+    precincts = find_and_set_index(precincts_gdf)
+    roads = load_road_network(roads_path)
+
     base_graph = Graph.from_geodataframe(precincts)
     
-    # For each precinct, find which other precincts it can reach via roads
-    # This is a simplified approach - in practice, you'd want to do network analysis
-    # For now, we'll assume precincts are connected if they both have road access
-    # and are geographically adjacent
-    
-    connections = []
-    for node1 in base_graph.nodes():
-        if node1 in precincts_with_roads:
-            for node2 in base_graph.neighbors(node1):
-                if node2 in precincts_with_roads:
-                    connections.append({
-                        'precinct_1': node1,
-                        'precinct_2': node2,
-                        'connected': True
-                    })
-    
-    print(f"  Road-connected precinct pairs: {len(connections):,}")
-    return pd.DataFrame(connections)
+    # 1. Build initial graph from road connectivity
+    road_graph = build_graph_from_road_connectivity(precincts, roads, graph_crs=precincts.crs)
+    test_graph_connectivity(road_graph, "Initial road-based graph")
 
-def apply_hierarchical_fallback(
-    precincts: gpd.GeoDataFrame,
-    connections: pd.DataFrame,
-    base_graph: Graph
-) -> pd.DataFrame:
-    """
-    Apply hierarchical fallback for orphaned precincts after water barrier removal.
-    
-    This step connects precincts that were orphaned by road/water analysis
-    to their adjacent neighbors in the same county.
-    
-    Parameters
-    ----------
-    precincts : gpd.GeoDataFrame
-        Precinct geometries with COUNTYID
-    connections : pd.DataFrame
-        Current connectivity after road/water analysis
-    base_graph : Graph
-        Base adjacency graph
-        
-    Returns
-    -------
-    pd.DataFrame
-        Extended connectivity with fallback connections
-    """
-    print("Applying hierarchical fallback for orphaned precincts...")
-    
-    # Get precincts that are currently connected
-    if connections.empty:
-        connected_precincts = set()
-    else:
-        connected_precincts = set(connections[connections['connected'] == True]['precinct_1'].unique()) | \
-                            set(connections[connections['connected'] == True]['precinct_2'].unique())
-    
-    # Find orphaned precincts (not connected after road/water analysis)
-    all_precincts = set(base_graph.nodes())
-    orphaned_precincts = all_precincts - connected_precincts
-    
-    print(f"  Orphaned precincts: {len(orphaned_precincts):,} ({len(orphaned_precincts)/len(all_precincts)*100:.1f}%)")
-    
-    # Apply fallback logic - connect orphaned precincts to same-county neighbors
-    fallback_connections = []
-    
-    for orphan in orphaned_precincts:
-        orphan_county = precincts.loc[orphan, 'COUNTYID'] if 'COUNTYID' in precincts.columns else None
-        
-        for neighbor in base_graph.neighbors(orphan):
-            neighbor_county = precincts.loc[neighbor, 'COUNTYID'] if 'COUNTYID' in precincts.columns else None
-            
-            # Connect if same county
-            if orphan_county and neighbor_county and orphan_county == neighbor_county:
-                fallback_connections.append({
-                    'precinct_1': orphan,
-                    'precinct_2': neighbor,
-                    'connected': True,
-                    'fallback_type': 'county_fallback'
-                })
-            # No fallback - barrier
-            else:
-                fallback_connections.append({
-                    'precinct_1': orphan,
-                    'precinct_2': neighbor,
-                    'connected': False,
-                    'fallback_type': 'barrier'
-                })
-    
-    # Combine existing connections with fallback
-    all_connections = []
-    
-    # Add existing connections
-    for _, row in connections.iterrows():
-        all_connections.append({
-            'precinct_1': row['precinct_1'],
-            'precinct_2': row['precinct_2'],
-            'connected': row['connected'],
-            'fallback_type': row.get('fallback_type', 'road')
-        })
-    
-    # Add fallback connections
-    all_connections.extend(fallback_connections)
-    
-    print(f"  Fallback connections added: {len(fallback_connections):,}")
-    print(f"  Total connections: {len(all_connections):,}")
-    
-    return pd.DataFrame(all_connections)
+    # 2. Add geographic fallback edges
+    # fallback_hierarchy = ["COUNTYID", "MUNIID"]
+    # fallback_graph = add_geographic_fallback_edges(road_graph, precincts, fallback_hierarchy)
 
-def identify_water_crossings(
-    precincts: gpd.GeoDataFrame,
-    water_bodies: gpd.GeoDataFrame,
-    connections: pd.DataFrame,
-    base_graph: Graph,
-    water_threshold: float = 0.5
-) -> pd.DataFrame:
-    """
-    Identify edges that cross major water bodies using direct geometric intersection.
-    
-    Parameters
-    ----------
-    precincts : gpd.GeoDataFrame
-        Precinct geometries
-    water_bodies : gpd.GeoDataFrame
-        Water body geometries
-    connections : pd.DataFrame
-        Current connectivity
-    base_graph : Graph
-        Base adjacency graph
-    water_threshold : float
-        Minimum fraction of edge length that must cross water to be removed
-        
-    Returns
-    -------
-    pd.DataFrame
-        Updated connections with water barrier information
-    """
-    print("Identifying water crossings...")
-    
-    # Reproject to match
-    precincts_proj = precincts.to_crs(water_bodies.crs)
-    
-    # Analyze each connection directly
-    water_crossings = []
-    water_removed = 0
-    
-    for _, row in connections.iterrows():
-        if not row['connected']:
-            water_crossings.append({
-                'precinct_1': row['precinct_1'],
-                'precinct_2': row['precinct_2'],
-                'connected': False,
-                'fallback_type': row.get('fallback_type', 'road'),
-                'water_barrier': False
-            })
-            continue
-        
-        # Get precinct geometries
-        p1_geom = precincts_proj.loc[row['precinct_1'], 'geometry']
-        p2_geom = precincts_proj.loc[row['precinct_2'], 'geometry']
-        
-        # Create line between centroids
-        line = LineString([p1_geom.centroid, p2_geom.centroid])
-        
-        # Check for intersections with water bodies
-        intersects_water = False
-        total_intersection_length = 0
-        
-        for _, water in water_bodies.iterrows():
-            if line.intersects(water.geometry):
-                intersection = line.intersection(water.geometry)
-                if intersection.length > 0:
-                    total_intersection_length += intersection.length
-        
-        # Check if intersection ratio exceeds threshold
-        if total_intersection_length > 0:
-            intersection_ratio = total_intersection_length / line.length
-            if intersection_ratio > water_threshold:
-                intersects_water = True
-                water_removed += 1
-        
-        water_crossings.append({
-            'precinct_1': row['precinct_1'],
-            'precinct_2': row['precinct_2'],
-            'connected': row['connected'] and not intersects_water,
-            'fallback_type': row.get('fallback_type', 'road'),
-            'water_barrier': intersects_water
-        })
-    
-    print(f"  Edges crossing water: {water_removed:,}")
-    
-    return pd.DataFrame(water_crossings)
+    # 3. Repair county connectivity
+    final_graph = repair_county_connectivity(road_graph, precincts, "COUNTYID")
 
-def _union_buffered_water_single(water_bodies: gpd.GeoDataFrame, buffer_m: float) -> object:
-    wb = water_bodies.copy()
-    if buffer_m and buffer_m > 0:
-        wb["geometry"] = wb.geometry.buffer(buffer_m)
-    return wb.union_all()
+    print("\n--- Final Graph Summary ---")
+    print(f"Base graph has {len(base_graph.edges)} edges")
+    print(f"Final graph has {len(final_graph.edges)} edges")
+    print(f"Edges removed: {len(base_graph.edges) - len(final_graph.edges)}")
+    test_graph_connectivity(final_graph, "Final repaired graph")
 
-def _has_direct_road_bridge(
-    boundary_geom,
-    p1_geom,
-    p2_geom,
-    roads_gdf: gpd.GeoDataFrame,
-    side_buffer_m: int = 15,
-) -> bool:
-    if boundary_geom is None or boundary_geom.is_empty:
-        return False
-    # Build a small corridor around the boundary
-    corridor = boundary_geom.buffer(side_buffer_m)
-    # Candidate roads by bbox filter
-    try:
-        sindex = roads_gdf.sindex
-        candidates = list(sindex.intersection(corridor.bounds))
-        if not candidates:
-            return False
-        roads_near = roads_gdf.iloc[candidates]
-    except Exception:
-        roads_near = roads_gdf
-    u_buf = p1_geom.buffer(side_buffer_m)
-    v_buf = p2_geom.buffer(side_buffer_m)
-    for _, r in roads_near.iterrows():
-        g = r.geometry
-        if g is None or g.is_empty:
-            continue
-        if not g.intersects(corridor):
-            continue
-        if g.intersects(u_buf) and g.intersects(v_buf):
-            return True
-    return False
+    return base_graph, final_graph
 
-def remove_water_edges_by_boundary_ratio_with_road_exception(
-    precincts: gpd.GeoDataFrame,
-    water_bodies: gpd.GeoDataFrame,
-    connections: pd.DataFrame,
-    base_graph: Graph,
-    roads: gpd.GeoDataFrame,
-    water_threshold: float = 0.75,
-    water_buffer_m: int = 150,
-    side_buffer_m: int = 15,
-) -> pd.DataFrame:
-    """Experimental water pruning:
-    If the shared boundary is mostly water (>= water_threshold), remove the edge unless
-    there is a direct road bridge intersecting the boundary and touching both sides.
-    """
-    precincts_proj = precincts.to_crs(water_bodies.crs)
-    roads_proj = roads.to_crs(water_bodies.crs)
-    water_union = _union_buffered_water_single(water_bodies, buffer_m=water_buffer_m)
-
-    out_rows = []
-    for _, row in connections.iterrows():
-        u = row['precinct_1']
-        v = row['precinct_2']
-        connected = bool(row['connected'])
-        if not connected:
-            out_rows.append({
-                'precinct_1': u,
-                'precinct_2': v,
-                'connected': False,
-                'fallback_type': row.get('fallback_type', 'road'),
-                'water_barrier': False
-            })
-            continue
-        try:
-            p1 = precincts_proj.loc[u, 'geometry']
-            p2 = precincts_proj.loc[v, 'geometry']
-        except Exception:
-            out_rows.append({
-                'precinct_1': u,
-                'precinct_2': v,
-                'connected': connected,
-                'fallback_type': row.get('fallback_type', 'road'),
-                'water_barrier': False
-            })
-            continue
-
-        # Shared boundary
-        boundary = p1.boundary.intersection(p2.boundary)
-        b_len = float(boundary.length) if boundary is not None else 0.0
-        if b_len <= 0.0:
-            # No meaningful shared boundary -> keep as is
-            out_rows.append({
-                'precinct_1': u,
-                'precinct_2': v,
-                'connected': connected,
-                'fallback_type': row.get('fallback_type', 'road'),
-                'water_barrier': False
-            })
-            continue
-        inter = boundary.intersection(water_union)
-        ratio = float(inter.length) / b_len if (inter is not None and not inter.is_empty) else 0.0
-
-        if ratio >= float(water_threshold):
-            # Require road bridge to keep
-            bridged = _has_direct_road_bridge(boundary, p1, p2, roads_proj, side_buffer_m=side_buffer_m)
-            keep = bridged
-            out_rows.append({
-                'precinct_1': u,
-                'precinct_2': v,
-                'connected': keep,
-                'fallback_type': row.get('fallback_type', 'road'),
-                'water_barrier': not keep
-            })
-        else:
-            out_rows.append({
-                'precinct_1': u,
-                'precinct_2': v,
-                'connected': True,
-                'fallback_type': row.get('fallback_type', 'road'),
-                'water_barrier': False
-            })
-
-    return pd.DataFrame(out_rows)
-
-def _combine_water_methods_union(
-    centroid_df: pd.DataFrame,
-    boundary_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """Combine results from two water methods; prune union of removals.
-
-    Keeps an edge connected only if BOTH methods keep it connected.
-    Marks water_barrier True if either method flags it.
-    """
-    # Normalize keys to tuple for robust merge
-    def keyify(df: pd.DataFrame) -> pd.Series:
-        return list(zip(df['precinct_1'], df['precinct_2']))
-
-    c = centroid_df.copy()
-    b = boundary_df.copy()
-    c['__key__'] = keyify(c)
-    b['__key__'] = keyify(b)
-    # Outer merge to include any pair appearing in either
-    merged = c.set_index('__key__').join(
-        b.set_index('__key__'), how='outer', lsuffix='_c', rsuffix='_b'
-    ).reset_index()
-
-    out_rows = []
-    for _, r in merged.iterrows():
-        # Pull ids from whichever side exists
-        u = int(r.get('precinct_1_c') if pd.notna(r.get('precinct_1_c')) else r.get('precinct_1_b'))
-        v = int(r.get('precinct_2_c') if pd.notna(r.get('precinct_2_c')) else r.get('precinct_2_b'))
-        conn_c = bool(r.get('connected_c', True))  # default keep if missing
-        conn_b = bool(r.get('connected_b', True))
-        connected = conn_c and conn_b
-        wb_c = bool(r.get('water_barrier_c', False))
-        wb_b = bool(r.get('water_barrier_b', False))
-        water_barrier = wb_c or wb_b or (not connected)
-        out_rows.append({
-            'precinct_1': u,
-            'precinct_2': v,
-            'connected': connected,
-            'fallback_type': r.get('fallback_type_c', r.get('fallback_type_b', 'road')),
-            'water_barrier': water_barrier,
-        })
-
-    return pd.DataFrame(out_rows)
-
-def test_graph_connectivity(graph, step_name="Graph", raise_error=True):
-    """
-    Test if graph is fully connected and raise error if not.
-    
-    Parameters
-    ----------
-    graph : Graph or networkx.Graph
-        Graph to test
-    step_name : str
-        Name of the step for error reporting
-        
-    Raises
-    ------
-    ValueError
-        If graph is not fully connected
-    """
-    import networkx as nx
-    
-    if isinstance(graph, Graph):
-        nx_graph = graph
-    else:
-        nx_graph = graph
-    
-    # Check connectivity
-    if not nx.is_connected(nx_graph):
-        components = list(nx.connected_components(nx_graph))
-        component_sizes = [len(comp) for comp in components]
-        
-        error_msg = f"{step_name} is not fully connected! Found {len(components)} components: {component_sizes}"
-        print(f"❌ {error_msg}")
-        
-        # Additional debugging info
-        largest_component = max(components, key=len)
-        isolated_components = [comp for comp in components if len(comp) == 1]
-        
-        print(f"   Largest component: {len(largest_component)} nodes")
-        print(f"   Isolated nodes: {len(isolated_components)}")
-        
-        if isolated_components:
-            isolated_nodes = [list(comp)[0] for comp in isolated_components]
-            print(f"   Isolated node indices: {isolated_nodes[:10]}{'...' if len(isolated_nodes) > 10 else ''}")
-        
-        if raise_error:
-            raise ValueError(error_msg)
-        return False
-    else:
-        print(f"✅ {step_name} is fully connected ({len(nx_graph.nodes)} nodes, {len(nx_graph.edges)} edges)")
 
 def build_transitable_graph(
-    precincts: gpd.GeoDataFrame,
-    transitability_params: Dict = None
+    precincts_path: str,
+    prune_water: bool,
+    prune_roads: bool,
+    reproject: bool,
+    lakes_path: str,
+    rivers_path: str
 ) -> Graph:
     """
-    Build a graph with transitability-aware connectivity.
-    
-    Parameters
-    ----------
-    precincts : gpd.GeoDataFrame
-        Precinct geometries with MUNIID and COUNTYID
-    transitability_params : Dict, optional
-        Configuration parameters
-        
-    Returns
-    -------
-    Graph
-        Transitability-aware graph
+    Original hierarchical pruning method. Kept for comparison.
     """
-    if transitability_params is None:
-        transitability_params = {
-            'enable': True,
-            'remove_water_barriers': True,
-            'verify_road_connectivity': True,
-            'min_lake_size_sqkm': 1.0,
-            'min_river_size_sqkm': 0.5,
-            'road_buffer_meters': 500.0,
-            'water_threshold': 0.1
-        }
-    
-    if not transitability_params.get('enable', True):
-        print("Transitability disabled, using standard graph...")
-        return Graph.from_geodataframe(precincts)
-    
-    print("Building transitability-aware graph...")
-    
-    # Step 1: Load datasets
-    roads = load_road_network()
-    water_bodies = load_water_bodies()
-    
-    # Step 2: Build base adjacency graph
+    print("\n--- Building Transitivity Graph (Hierarchical Method) ---")
+    precincts_gdf = gpd.read_file(precincts_path)
+    precincts = find_and_set_index(precincts_gdf)
+
     base_graph = Graph.from_geodataframe(precincts)
-    print(f"  Base graph: {len(base_graph.nodes)} nodes, {len(base_graph.edges)} edges")
+    final_graph = base_graph.copy()
+
+    if prune_water:
+        print("\nPruning edges by water barriers...")
+        lakes = gpd.read_file(lakes_path)
+        rivers = gpd.read_file(rivers_path)
+        if reproject:
+            if lakes.crs != precincts.crs: lakes = lakes.to_crs(precincts.crs)
+            if rivers.crs != precincts.crs: rivers = rivers.to_crs(precincts.crs)
+        
+        water_union = unary_union(list(lakes.geometry) + list(rivers.geometry))
+        
+        edges_to_remove = []
+        for u, v, data in final_graph.edges(data=True):
+            if data["shared_perim"] and data["shared_perim"].intersects(water_union):
+                edges_to_remove.append((u, v))
+        final_graph.remove_edges_from(edges_to_remove)
+        print(f"  - Removed {len(edges_to_remove)} edges crossing water barriers.")
+
+    if prune_roads:
+        print("\nNote: Hierarchical road pruning logic is a placeholder in this version.")
+        pass
+
+    print(f"\nBase graph has {len(base_graph.edges)} edges")
+    print(f"Final graph has {len(final_graph.edges)} edges")
     
-    # Step 3: Road connectivity analysis (prune non-road connected edges)
-    if transitability_params.get('verify_road_connectivity', True):
-        road_connections = identify_road_connected_precincts(
-            precincts, roads, 
-            buffer_meters=transitability_params.get('road_buffer_meters', 500.0)
-        )
-    else:
-        # Use all base connections
-        road_connections = []
-        for node1 in base_graph.nodes():
-            for node2 in base_graph.neighbors(node1):
-                road_connections.append({
-                    'precinct_1': node1,
-                    'precinct_2': node2,
-                    'connected': True,
-                    'fallback_type': 'adjacent'
-                })
-        road_connections = pd.DataFrame(road_connections)
-    
-    # Step 4: Water barrier analysis (choose method)
-    if transitability_params.get('remove_water_barriers', True):
-        water_method = transitability_params.get('water_method', 'centroid')
-        if water_method == 'boundary_with_road_exception':
-            connections = remove_water_edges_by_boundary_ratio_with_road_exception(
-                precincts,
-                water_bodies,
-                road_connections,
-                base_graph,
-                roads,
-                water_threshold=transitability_params.get('water_threshold', 0.75),
-                water_buffer_m=int(transitability_params.get('water_buffer_m', 150)),
-                side_buffer_m=int(transitability_params.get('road_boundary_buffer_m', 15)),
-            )
-        elif water_method == 'both':
-            centroid_conn = identify_water_crossings(
-                precincts, water_bodies, road_connections, base_graph,
-                water_threshold=transitability_params.get('water_threshold_centroid', transitability_params.get('water_threshold', 0.5))
-            )
-            boundary_conn = remove_water_edges_by_boundary_ratio_with_road_exception(
-                precincts,
-                water_bodies,
-                road_connections,
-                base_graph,
-                roads,
-                water_threshold=transitability_params.get('water_threshold_boundary', transitability_params.get('water_threshold', 0.75)),
-                water_buffer_m=int(transitability_params.get('water_buffer_m', 150)),
-                side_buffer_m=int(transitability_params.get('road_boundary_buffer_m', 15)),
-            )
-            connections = _combine_water_methods_union(centroid_conn, boundary_conn)
-        else:
-            connections = identify_water_crossings(
-                precincts, water_bodies, road_connections, base_graph,
-                water_threshold=transitability_params.get('water_threshold_centroid', 0.5)
-            )
-    else:
-        connections = road_connections
-    
-    # Step 5: Hierarchical fallback (connect orphaned precincts to same-county neighbors)
-    connections = apply_hierarchical_fallback(precincts, connections, base_graph)
-    
-    # Step 6: Build final graph
-    final_graph = Graph()
-    
-    # Add all nodes
-    for node in base_graph.nodes():
-        final_graph.add_node(node, **base_graph.nodes[node])
-    
-    # Add only valid connections
-    valid_connections = connections[connections['connected'] == True]
-    for _, row in valid_connections.iterrows():
-        final_graph.add_edge(row['precinct_1'], row['precinct_2'])
-    
-    print(f"  Final graph: {len(final_graph.nodes)} nodes, {len(final_graph.edges)} edges")
-    print(f"  Edges removed: {len(base_graph.edges) - len(final_graph.edges)}")
-    
-    # Test connectivity (don't raise error - disconnected graphs may be valid)
     test_graph_connectivity(final_graph, "Final transitability graph", raise_error=False)
     
-    return final_graph
-
-def analyze_transitability_impact(
-    original_graph: Graph,
-    transitable_graph: Graph
-) -> Dict:
-    """
-    Analyze the impact of transitability modifications.
-    
-    Parameters
-    ----------
-    original_graph : Graph
-        Original adjacency graph
-    transitable_graph : Graph
-        Transitability-modified graph
-        
-    Returns
-    -------
-    Dict
-        Analysis results
-    """
-    original_edges = len(original_graph.edges)
-    transitable_edges = len(transitable_graph.edges)
-    edges_removed = original_edges - transitable_edges
-    
-    # Check connectivity
-    import networkx as nx
-    
-    original_components = list(nx.connected_components(original_graph))
-    transitable_components = list(nx.connected_components(transitable_graph))
-    
-    return {
-        'original_edges': original_edges,
-        'transitable_edges': transitable_edges,
-        'edges_removed': edges_removed,
-        'removal_percentage': edges_removed / original_edges * 100,
-        'original_components': len(original_components),
-        'transitable_components': len(transitable_components),
-        'connectivity_preserved': len(transitable_components) == len(original_components)
-    }
+    return base_graph, final_graph

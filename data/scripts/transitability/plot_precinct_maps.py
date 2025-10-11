@@ -1,6 +1,5 @@
 import argparse
 import os
-import json
 import pandas as pd
 import geopandas as gpd
 import matplotlib.pyplot as plt
@@ -41,185 +40,172 @@ def find_county_name_column(gdf):
 
     return None
 
-def get_county_bounds(county_name, counties_gdf, name_col):
-    """
-    Gets the geometry and padded bounding box for a single county.
-    """
-    try:
-        upper_names = counties_gdf[name_col].astype(str).str.upper()
-        county_geom = counties_gdf[upper_names == county_name].union_all()
-        if county_geom.is_empty:
-            return None, None
-        
-        minx, miny, maxx, maxy = county_geom.bounds
-        pad_x = (maxx - minx) * 0.05
-        pad_y = (maxy - miny) * 0.05
-        bounds = (minx - pad_x, maxx + pad_x, miny - pad_y, maxy + pad_y)
-        return county_geom, bounds
-    except Exception:
+def get_county_data(county_name, counties_gdf, county_name_col):
+    """Retrieves the geometry GeoDataFrame and bounding box for a specific county."""
+    if not county_name_col:
+        print("Error: Could not determine the county name column in the counties file.")
         return None, None
-
-def plot_optional_layers(ax, layers):
-    """
-    Plots optional geographic layers like water and roads on the given axes.
-    """
-    if 'lakes' in layers and not layers['lakes'].empty:
-        layers['lakes'].plot(ax=ax, color='lightblue', edgecolor='lightblue', linewidth=0.25, alpha=0.75, zorder=2)
-    
-    if 'rivers' in layers and not layers['rivers'].empty:
-        layers['rivers'].plot(ax=ax, color='lightblue', edgecolor='lightblue', linewidth=0.5, alpha=0.75, zorder=3)
         
-    if 'roads' in layers and not layers['roads'].empty:
-        layers['roads'].plot(ax=ax, color='olive', linewidth=0.5, alpha=0.75, zorder=4)
+    county_gdf = counties_gdf[counties_gdf[county_name_col].str.upper() == county_name]
+    if not county_gdf.empty:
+        # Return the GeoDataFrame itself for plotting, and its bounds
+        bounds = county_gdf.total_bounds
+        return county_gdf, bounds
+    
+    print(f"Warning: County '{county_name}' not found in counties file.")
+    return None, None
+
+def plot_optional_layers(ax, lakes_gdf, rivers_gdf, roads_gdf, crs):
+    """Plots optional geographic layers like water and roads with a consistent style."""
+    if lakes_gdf is not None:
+        lakes_gdf = lakes_gdf.to_crs(crs)
+        lakes_gdf.plot(ax=ax, color="lightblue", edgecolor="lightblue", linewidth=0.25, alpha=0.75, zorder=2)
+    if rivers_gdf is not None:
+        rivers_gdf = rivers_gdf.to_crs(crs)
+        rivers_gdf.plot(ax=ax, color="lightblue", edgecolor="lightblue", linewidth=0.5, alpha=0.5, zorder=3)
+    if roads_gdf is not None:
+        roads_gdf = roads_gdf.to_crs(crs)
+        roads_gdf.plot(ax=ax, color='olive', linewidth=0.5, alpha=0.75, zorder=4)
 
 def plot_edges(precincts_gdf, edges_df, ax, **kwargs):
-    """
-    Plots the connectivity graph edges on the given axes.
-    """
-    for _, row in edges_df.iterrows():
+    """Plots edges on a map, connecting the centroids of precincts."""
+    if edges_df is None or edges_df.empty:
+        return
+        
+    for _, edge in edges_df.iterrows():
         try:
-            # Use node index from GeoDataFrame if it exists, otherwise fall back to integer index
-            u_lookup = row['source']
-            v_lookup = row['target']
-            
-            u_geom = precincts_gdf.loc[u_lookup].geometry
-            v_geom = precincts_gdf.loc[v_lookup].geometry
-            
-            p1 = u_geom.representative_point()
-            p2 = v_geom.representative_point()
-            
+            u, v = edge['u'], edge['v']
+            p1 = precincts_gdf.loc[u].geometry.representative_point()
+            p2 = precincts_gdf.loc[v].geometry.representative_point()
             ax.plot([p1.x, p2.x], [p1.y, p2.y], **kwargs)
         except (KeyError, IndexError):
-            # Skip edges where one of the nodes doesn't exist in the precincts file
+            # Skip edges where one of the nodes is not in the precincts GDF
             continue
 
-def plot_statewide_map(precincts_gdf, output_path, edges_df=None, optional_layers=None):
-    """Generates and saves a single plot of the entire state."""
-    fig, ax = plt.subplots(1, 1, figsize=(12, 10))
-    ax.set_title("Statewide Precinct View", fontsize=16)
 
-    precincts_gdf.plot(ax=ax, edgecolor='black', linewidth=1.5, facecolor='none', zorder=1)
 
-    if optional_layers:
-        plot_optional_layers(ax, optional_layers)
+def plot_statewide_map(precincts_gdf, output_path, edges_df=None, lakes_gdf=None, rivers_gdf=None, roads_gdf=None):
+    """Generates and saves a plot of all precincts in the state."""
+    fig, ax = plt.subplots(1, 1, figsize=(15, 15))
     
-    if edges_df is not None:
-        plot_edges(precincts_gdf, edges_df, ax, color='red', alpha=0.5, linewidth=1.5, zorder=5)
+    # Plot precincts as boundaries only to serve as the base grid
+    precincts_gdf.boundary.plot(ax=ax, edgecolor='black', linewidth=1.5, facecolor='none', zorder=1)
+
+    # Plot optional layers on top of the precinct grid
+    plot_optional_layers(ax, lakes_gdf, rivers_gdf, roads_gdf, precincts_gdf.crs)
     
-    state_label_threshold = 5e8  # 500 million m^2
+    # Plot connectivity graph on top of everything
+    plot_edges(precincts_gdf, edges_df, ax, color='red', linewidth=1.5, alpha=0.5, zorder=5)
+
     for index, row in precincts_gdf.iterrows():
-        if row['area_m2'] > state_label_threshold:
-            centroid = row.geometry.representative_point()
-            ax.text(centroid.x, centroid.y, str(index), ha='center', va='center', fontsize=10, zorder=6,
-                    bbox=dict(facecolor='white', alpha=0.75, edgecolor='none', boxstyle='round,pad=0.1'))
-    
-    ax.set_axis_off()
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
-    print(f"Saved statewide map to {output_path}")
+        centroid = row.geometry.representative_point()
+        ax.text(centroid.x, centroid.y, str(index), ha='center', va='center', fontsize=10, zorder=6,
+                bbox=dict(facecolor='white', alpha=0.75, edgecolor='none', boxstyle='round,pad=0.1'))
 
-def plot_county_map(county_name, precincts_gdf, county_geom, county_bounds, output_path, edges_df=None, optional_layers=None):
-    """Generates and saves a single plot zoomed to a specific county."""
-    fig, ax = plt.subplots(1, 1, figsize=(12, 10))
+    ax.set_title("Statewide Precinct Map", fontsize=16)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+
+def plot_county_map(county_name, precincts_gdf, county_gdf, bounds, output_path, edges_df=None, lakes_gdf=None, rivers_gdf=None, roads_gdf=None):
+    """Generates and saves a plot for a specific county."""
+    fig, ax = plt.subplots(1, 1, figsize=(10, 10))
+
+    precincts_gdf.boundary.plot(ax=ax, edgecolor='black', linewidth=1.5, facecolor='none', zorder=1)
+    
+    # Plot optional layers 
+    plot_optional_layers(ax, lakes_gdf, rivers_gdf, roads_gdf, precincts_gdf.crs)
+    
+    # Plot connectivity graph on top
+    plot_edges(precincts_gdf, edges_df, ax, color='red', linewidth=1.5, alpha=0.5, zorder=5)
+
+    # Get precincts within county
+    county_precincts = precincts_gdf[precincts_gdf['COUNTY'].str.upper() == county_name.upper()]
+
+    for index, row in county_precincts.iterrows():
+        centroid = row.geometry.representative_point()
+        ax.text(centroid.x, centroid.y, str(index), ha='center', va='center', fontsize=12, zorder=6,
+                bbox=dict(facecolor='white', alpha=0.75, edgecolor='none', boxstyle='round,pad=0.1'))
+
     ax.set_title(f"{county_name.title()} County Precincts", fontsize=16)
-
-    precincts_gdf.plot(ax=ax, edgecolor='black', linewidth=1.5, facecolor='none', zorder=1)
-
-    if optional_layers:
-        plot_optional_layers(ax, optional_layers)
-
-    minx, maxx, miny, maxy = county_bounds
-    ax.set_xlim(minx, maxx)
-    ax.set_ylim(miny, maxy)
+    ax.set_xlim(bounds[0], bounds[2])
+    ax.set_ylim(bounds[1], bounds[3])
+    ax.set_xticks([])
+    ax.set_yticks([])
     
-    if edges_df is not None:
-        plot_edges(precincts_gdf, edges_df, ax, color='red', alpha=0.5, linewidth=1.5, zorder=5)
-
-    county_label_threshold = 5e5 # 0.5 million m^2
-    precincts_in_county = precincts_gdf[precincts_gdf.geometry.representative_point().within(county_geom)]
-
-    for index, row in precincts_in_county.iterrows():
-        if row['area_m2'] > county_label_threshold:
-            centroid = row.geometry.representative_point()
-            ax.text(centroid.x, centroid.y, str(index), ha='center', va='center', fontsize=12, zorder=6,
-                    bbox=dict(facecolor='white', alpha=0.75, edgecolor='none', boxstyle='round,pad=0.1'))
-    
-    ax.set_axis_off()
-    plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close(fig)
-    print(f"Saved {county_name.title()} County map to {output_path}")
+    plt.close()
 
-def main(precincts_path, counties_path, output_dir, connectivity_path, lakes_path, rivers_path, roads_path):
-    """
-    Main function to load data and generate all requested maps.
-    """
-    print("Loading geographic data...")
-    precincts_gdf = gpd.read_file(precincts_path)
-    counties_gdf = gpd.read_file(counties_path)
-    
-    # Load optional geographic layers
-    optional_layers = {}
-    if lakes_path:
-        print(f"Loading lakes data from {lakes_path}...")
-        optional_layers['lakes'] = gpd.read_file(lakes_path)
-    if rivers_path:
-        print(f"Loading rivers data from {rivers_path}...")
-        optional_layers['rivers'] = gpd.read_file(rivers_path)
-    if roads_path:
-        print(f"Loading roads data from {roads_path}...")
-        optional_layers['roads'] = gpd.read_file(roads_path)
+def load_connectivity_edges(precincts_gdf, connectivity_csv_path):
+    """Loads connectivity data and determines the set of edges to plot."""
+    from gerrychain import Graph
 
-    edges_df = None
-    if connectivity_path:
-        print(f"Loading connectivity data from {connectivity_path}...")
-        with open(connectivity_path, 'r') as f:
-            edges_data = json.load(f)
-        edges_df = pd.DataFrame(edges_data)
+    if not connectivity_csv_path or not os.path.exists(connectivity_csv_path):
+        print("Connectivity CSV not found. Plotting without connectivity graph.")
+        return None
+
+    print(f"Loading connectivity data from {connectivity_csv_path}...")
+    base_graph = Graph.from_geodataframe(precincts_gdf)
+    base_edges = {tuple(sorted(e)) for e in base_graph.edges}
     
+    removed_edges_df = pd.read_csv(connectivity_csv_path)
+    removed_edges = {tuple(sorted(x)) for x in removed_edges_df.to_numpy()}
+    
+    final_edges = base_edges - removed_edges
+    
+    edges_df = pd.DataFrame(list(final_edges), columns=['u', 'v'])
+    print(f"Loaded {len(edges_df)} edges for plotting.")
+    return edges_df
+
+def main(precincts_file, counties_file, output_dir, connectivity_csv, lakes_file, rivers_file, roads_file):
     os.makedirs(output_dir, exist_ok=True)
+    
+    print("Loading geospatial data...")
+    precincts_gdf = gpd.read_file(precincts_file)
+    # Ensure a unique ID column is the index. Fallback to default if none found.
+    if 'ID' in precincts_gdf.columns and precincts_gdf['ID'].is_unique:
+        precincts_gdf = precincts_gdf.set_index('ID')
+    else:
+        print("Warning: 'ID' column not found or not unique. Using default index.")
 
+    counties_gdf = gpd.read_file(counties_file)
+    
+    # --- CRS Alignment (Fix for clipping issues) ---
     if precincts_gdf.crs != counties_gdf.crs:
-        print("Notice: Aligning CRS between precinct and county files.")
-        precincts_gdf = precincts_gdf.to_crs(counties_gdf.crs)
-
-    # Align CRS for optional layers
-    for name, gdf in optional_layers.items():
-        if gdf.crs != precincts_gdf.crs:
-            print(f"Notice: Aligning CRS for {name} layer.")
-            optional_layers[name] = gdf.to_crs(precincts_gdf.crs)
-
-    gdf_proj = precincts_gdf.to_crs("EPSG:32612") # Project to compute area in meters
-    precincts_gdf['area_m2'] = gdf_proj.geometry.area
-
-    print("\nGenerating statewide map...")
-    statewide_path = os.path.join(output_dir, "statewide_precincts.png")
-    plot_statewide_map(precincts_gdf, statewide_path, edges_df=edges_df, optional_layers=optional_layers)
-
+        print("Aligning CRS between precincts and counties files...")
+        counties_gdf = counties_gdf.to_crs(precincts_gdf.crs)
+        
     county_name_col = find_county_name_column(counties_gdf)
-    if not county_name_col:
-        print("\n---")
-        print("Error: Could not automatically find the county name column.")
-        print("Available columns are:")
-        for col in counties_gdf.columns:
-            print(f"  - {col}")
-        print("---\n")
-        return
 
-    all_counties = sorted(counties_gdf[county_name_col].unique())
-    for county_name in all_counties:
-        print(f"\nGenerating map for {county_name.title()} County...")
-        geom, bounds = get_county_bounds(county_name.upper(), counties_gdf, county_name_col)
-        if geom and bounds:
-            county_filename = f"{county_name.replace(' ', '_').lower()}_precincts.png"
-            output_path = os.path.join(output_dir, county_filename)
-            plot_county_map(
-                county_name, precincts_gdf, geom, bounds, output_path,
-                edges_df=edges_df, optional_layers=optional_layers
-            )
-        else:
-            print(f"Could not find or process geometry for {county_name.title()} County.")
+    # Load optional layers
+    lakes_gdf = gpd.read_file(lakes_file) if lakes_file and os.path.exists(lakes_file) else None
+    rivers_gdf = gpd.read_file(rivers_file) if rivers_file and os.path.exists(rivers_file) else None
+    roads_gdf = gpd.read_file(roads_file) if roads_file and os.path.exists(roads_file) else None
+    
+    # Load connectivity data if provided
+    edges_df = load_connectivity_edges(precincts_gdf, connectivity_csv)
+
+    # --- Generate Statewide Map ---
+    print("\nGenerating statewide map...")
+    state_filename = os.path.join(output_dir, "statewide_precincts.png")
+    plot_statewide_map(precincts_gdf, state_filename, edges_df, lakes_gdf, rivers_gdf, roads_gdf)
+
+    # --- Generate County Maps ---
+    if not county_name_col:
+        print("\nSkipping county maps because a valid county name column could not be identified.")
+    else:
+        all_counties = sorted(counties_gdf[county_name_col].unique())
+        for county_name in all_counties:
+            print(f"\nGenerating map for {county_name.title()} County...")
+            county_gdf, bounds = get_county_data(county_name.upper(), counties_gdf, county_name_col)
+            if county_gdf is not None and bounds is not None:
+                county_filename = f"{county_name.replace(' ', '_').lower()}_precincts.png"
+                output_path = os.path.join(output_dir, county_filename)
+                plot_county_map(county_name, precincts_gdf, county_gdf, bounds, output_path, edges_df, lakes_gdf, rivers_gdf, roads_gdf)
+            else:
+                print(f"Could not find or process geometry for {county_name.title()} County.")
     
     print("\nAll maps have been generated.")
 
@@ -239,7 +225,7 @@ if __name__ == "__main__":
         "--connectivity",
         type=str,
         default=None,
-        help="Optional path to a JSON file with precinct connectivity data (e.g., transitability.json)."
+        help="Optional path to a CSV file with removed precinct edges."
     )
     parser.add_argument(
         "--lakes",
@@ -262,6 +248,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     main(
-        args.precincts_file, args.counties_file, args.output_dir, args.connectivity,
-        args.lakes, args.rivers, args.roads
+        args.precincts_file, args.counties_file, args.output_dir, 
+        args.connectivity, args.lakes, args.rivers, args.roads
     )

@@ -1,121 +1,154 @@
 #!/usr/bin/env python3
-"""Visualize transitability artifacts (JSON edges) in 4 panels:
-
-1. Base adjacency (from precinct adjacency)
-2. Final (from transitability.json edge list)
-3. Removed (Base minus Final)
-4. Overlay: precinct boundaries, rivers/lakes, and final graph
 """
+Visualize transitability artifacts in 4 panels using a CSV of removed edges.
 
-from __future__ import annotations
-
+1. Base adjacency (from precinct geometry)
+2. Final (Transitable) graph (Base - Removed)
+3. Removed edges (from the CSV file)
+4. Overlay: precinct boundaries, water features, and the final graph
+"""
 import argparse
-from pathlib import Path
-import sys
-
 import geopandas as gpd
 import pandas as pd
 import matplotlib.pyplot as plt
-import json
 from gerrychain import Graph
+import os
 
-# Ensure project root on path for absolute imports if needed
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.append(str(PROJECT_ROOT))
-
-
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Visualize transitability artifacts")
-    p.add_argument("--precincts", default="data/UT_precincts.geojson")
-    p.add_argument("--artifacts-dir", default="data/transitability")
-    p.add_argument("--lakes", default="data/geography_processed/UtahMajorLakes_filtered.shp")
-    p.add_argument("--rivers", default="data/geography_processed/UtahMajorRivers_filtered.shp")
-    p.add_argument("--save", action="store_true")
-    return p.parse_args()
-
+def find_and_set_index(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    """Heuristically finds a unique ID column and sets it as the index."""
+    CANDIDATE_ID_COLS = ["ID", "GEOID", "GEOID20", "VTDST20"]
+    
+    for col in CANDIDATE_ID_COLS:
+        if col in gdf.columns:
+            if gdf[col].is_unique:
+                print(f"Found unique ID column: '{col}'. Setting as index.")
+                return gdf.set_index(col)
+            
+    print("Warning: No unique standard ID column found ('ID', 'GEOID', etc.). Using existing index.")
+    return gdf
 
 def plot_edges(precincts: gpd.GeoDataFrame, edges: pd.DataFrame, ax, color: str, alpha: float, lw: float):
-    for _, r in edges.iterrows():
+    """Helper function to plot graph edges between precinct centroids."""
+    for _, row in edges.iterrows():
         try:
-            p1 = precincts.loc[int(r["u"]), "geometry"].centroid
-            p2 = precincts.loc[int(r["v"]), "geometry"].centroid
-            ax.plot([p1.x, p2.x], [p1.y, p2.y], color=color, alpha=alpha, linewidth=lw)
-        except Exception:
+            p1 = precincts.loc[row["u"]].geometry.centroid
+            p2 = precincts.loc[row["v"]].geometry.centroid
+            line = [(p1.x, p1.y), (p2.x, p2.y)]
+            (xs, ys) = zip(*line)
+            ax.plot(xs, ys, color=color, alpha=alpha, linewidth=lw, solid_capstyle='round', zorder=5)
+        except KeyError:
+            # This can happen if the edges file and precincts file are mismatched
+            # We'll just skip plotting the problematic edge.
             continue
 
+def main():
+    parser = argparse.ArgumentParser(
+        description="Visualize transitability results from a removed_edges.csv file."
+    )
+    parser.add_argument(
+        "--precincts", 
+        default="data/UT_precincts.geojson",
+        help="Path to the precincts GeoJSON or shapefile."
+    )
+    parser.add_argument(
+        "--removed_edges_csv", 
+        default="data/transitability/removed_edges.csv",
+        help="Path to the CSV file containing edges to be removed."
+    )
+    parser.add_argument(
+        "--lakes", 
+        default="data/geography_processed/UtahMajorLakes_filtered.shp",
+        help="Path to the shapefile for major lakes."
+    )
+    parser.add_argument(
+        "--rivers", 
+        default="data/geography_processed/UtahMajorRivers_filtered.shp",
+        help="Path to the shapefile for major rivers."
+    )
+    parser.add_argument(
+        "--save_path", 
+        help="Path to save the output visualization PNG."
+    )
+    args = parser.parse_args()
 
-def main() -> int:
-    args = parse_args()
-    art = Path(args.artifacts_dir)
-
-    precincts = gpd.read_file(args.precincts)
-    # Build base adjacency from precincts
+    # --- Data Loading and Graph Processing ---
+    print("Loading precinct data...")
+    precincts_raw = gpd.read_file(args.precincts)
+    precincts = find_and_set_index(precincts_raw)
+    
+    # Create the full base graph from precinct adjacencies
     base_graph = Graph.from_geodataframe(precincts)
-    edges_base = pd.DataFrame([(int(u), int(v)) for u, v in base_graph.edges()], columns=["u", "v"])
+    base_edges_set = {tuple(sorted(e)) for e in base_graph.edges}
+    
+    # Load the set of edges that were removed
+    print(f"Loading removed edges from '{args.removed_edges_csv}'...")
+    removed_edges_df = pd.read_csv(args.removed_edges_csv)
+    removed_edges_set = {tuple(sorted(x)) for x in removed_edges_df.to_numpy()}
+    
+    # The final set of edges is the base set minus the removed set
+    final_edges_set = base_edges_set - removed_edges_set
+    
+    print(f"Base graph has {len(base_edges_set)} edges.")
+    print(f"Removed {len(removed_edges_set)} edges.")
+    print(f"Final graph has {len(final_edges_set)} edges.")
 
-    # Load final edges from JSON
-    json_path = art / "transitability.json"
-    with open(json_path, "r") as f:
-        edgelist = json.load(f)
-    edges_final = pd.DataFrame([(int(e["source"]), int(e["target"])) for e in edgelist], columns=["u", "v"])
+    # Prepare DataFrames for plotting
+    edges_base_df = pd.DataFrame(list(base_edges_set), columns=["u", "v"])
+    edges_final_df = pd.DataFrame(list(final_edges_set), columns=["u", "v"])
+    edges_removed_df = removed_edges_df # Use the dataframe directly
 
-    fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+    # --- Plotting ---
+    print("Generating 4-panel visualization...")
+    fig, axes = plt.subplots(2, 2, figsize=(20, 20))
+    fig.suptitle("Transitability Analysis", fontsize=20, y=0.98)
 
-    ax = axes[0][0]
-    precincts.plot(ax=ax, color="white", edgecolor="black", linewidth=0.2)
-    plot_edges(precincts, edges_base, ax, color="tab:blue", alpha=0.6, lw=0.6)
-    ax.set_aspect("equal")
-    ax.set_title("Base Adjacency")
+    # Panel 1: Base adjacency
+    ax = axes[0, 0]
+    precincts.plot(ax=ax, color="whitesmoke", edgecolor="gray", linewidth=0.3, zorder=1)
+    plot_edges(precincts, edges_base_df, ax, color="tab:blue", alpha=0.5, lw=0.5)
+    ax.set_title("1. Base Adjacency Graph")
 
-    ax = axes[0][1]
-    precincts.plot(ax=ax, color="white", edgecolor="black", linewidth=0.2)
-    plot_edges(precincts, edges_final, ax, color="tab:red", alpha=0.6, lw=0.6)
-    ax.set_aspect("equal")
-    ax.set_title("Final")
+    # Panel 2: Final (Transitable) Edges
+    ax = axes[0, 1]
+    precincts.plot(ax=ax, color="whitesmoke", edgecolor="gray", linewidth=0.3, zorder=1)
+    plot_edges(precincts, edges_final_df, ax, color="tab:green", alpha=0.6, lw=0.6)
+    ax.set_title("2. Final (Transitable) Graph")
 
-    ax = axes[1][0]
-    precincts.plot(ax=ax, color="white", edgecolor="black", linewidth=0.2)
-    base_set = set((int(u), int(v)) for u, v in zip(edges_base["u"], edges_base["v"]))
-    final_set = set((int(u), int(v)) for u, v in zip(edges_final["u"], edges_final["v"]))
-    removed = pd.DataFrame(list(base_set - final_set), columns=["u", "v"])  # edges removed by transitability
-    plot_edges(precincts, removed, ax, color="tab:purple", alpha=0.8, lw=1.2)
-    ax.set_aspect("equal")
-    ax.set_title("Removed (Base - Final)")
+    # Panel 3: Removed Edges
+    ax = axes[1, 0]
+    precincts.plot(ax=ax, color="whitesmoke", edgecolor="gray", linewidth=0.3, zorder=1)
+    plot_edges(precincts, edges_removed_df, ax, color="tab:purple", alpha=0.7, lw=0.8)
+    ax.set_title("3. Removed Edges")
 
-    # Overlay panel: precincts (boundaries), rivers/lakes, final graph
-    ax = axes[1][1]
-    lakes = gpd.read_file(args.lakes)
-    rivers = gpd.read_file(args.rivers)
-    # Reproject water to match precincts
-    if lakes.crs != precincts.crs:
-        lakes = lakes.to_crs(precincts.crs)
-    if rivers.crs != precincts.crs:
-        rivers = rivers.to_crs(precincts.crs)
-    # Plot order: precinct boundaries (no fill), water, then graph
-    precincts.boundary.plot(ax=ax, color="black", linewidth=0.2)
-    try:
-        lakes.plot(ax=ax, color="#6baed6", edgecolor="#3182bd", linewidth=0.3, alpha=0.6)
-    except Exception:
-        pass
-    try:
-        rivers.plot(ax=ax, color="#3182bd", linewidth=0.4)
-    except Exception:
-        pass
-    plot_edges(precincts, edges_final, ax, color="tab:red", alpha=0.6, lw=0.6)
-    ax.set_aspect("equal")
-    ax.set_title("Overlay: Precincts + Water + Graph")
+    # Panel 4: Overlay
+    ax = axes[1, 1]
+    lakes = gpd.read_file(args.lakes).to_crs(precincts.crs)
+    rivers = gpd.read_file(args.rivers).to_crs(precincts.crs)
+    precincts.boundary.plot(ax=ax, color="black", linewidth=0.2, zorder=2)
+    lakes.plot(ax=ax, color="#a6cee3", edgecolor="#1f78b4", linewidth=0.4, alpha=0.7, zorder=3)
+    rivers.plot(ax=ax, color="#1f78b4", linewidth=0.5, zorder=4)
+    plot_edges(precincts, edges_final_df, ax, color="tab:red", alpha=0.7, lw=0.7)
+    ax.set_title("4. Overlay (Final Graph + Water Features)")
 
-    plt.tight_layout()
-    if args.save:
-        (art / "plots").mkdir(parents=True, exist_ok=True)
-        out = art / "plots" / "transitability_overview.png"
-        plt.savefig(out, dpi=250, bbox_inches="tight")
-        print(f"Saved: {out}")
+    # Clean up axes
+    for ax_row in axes:
+        for ax_col in ax_row:
+            ax_col.set_xticks([])
+            ax_col.set_yticks([])
+            ax_col.set_aspect('equal')
 
-    plt.show()
-    return 0
-
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    
+    # Save or show the plot
+    if args.save_path:
+        output_folder = os.path.dirname(args.save_path)
+        if output_folder:
+            os.makedirs(output_folder, exist_ok=True)
+        plt.savefig(args.save_path, dpi=300)
+        print(f"Saved visualization to '{args.save_path}'")
+    else:
+        plt.show()
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
+

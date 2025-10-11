@@ -102,7 +102,7 @@ def save_visualization(partition, step, results, counties=None, municipalities=N
     fig, (ax_full, ax_zoom) = plt.subplots(1, 2, figsize=(12, 8))
 
     # Left: full map
-    partition.plot(ax=ax_full, cmap='tab20c')
+    partition.plot(ax=ax_full, cmap='tab20c', edgecolor='none')
     if municipalities is not None:
         municipalities.boundary.plot(ax=ax_full, color='black', linewidth=0.25, alpha=0.5)
     if counties is not None:
@@ -114,7 +114,7 @@ def save_visualization(partition, step, results, counties=None, municipalities=N
     ax_full.set_aspect('equal')
 
     # Right: Wasatch Front zoom (fallback to full extent if bounds unresolved)
-    partition.plot(ax=ax_zoom, cmap='tab20c')
+    partition.plot(ax=ax_zoom, cmap='tab20c', edgecolor='none')
     if municipalities is not None:
         municipalities.boundary.plot(ax=ax_zoom, color='black', linewidth=0.25, alpha=0.5)
     if counties is not None:

@@ -122,7 +122,7 @@ class EnsembleRunner:
         self.initial_partition = create_initial_partition(self.graph, self.precincts, self.updaters)
         
         self.ideal_population = sum(self.initial_partition["population"].values()) / len(self.initial_partition)
-        self.proposal = create_proposal(self.ideal_population, self.precincts, config['region_surcharges'])
+        self.proposal = create_proposal(self.ideal_population, self.precincts, config['region_surcharges'], config['constraints']['pop_deviation'] or 0.001, round(len(self.initial_partition) / 2))
         self.constraints = create_constraints(self.initial_partition, **config['constraints'])
         
     def run(self, output_dir=None, save_config=True):
