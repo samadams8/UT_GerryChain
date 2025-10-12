@@ -88,9 +88,8 @@ def _collect_step_metrics(partition, step, available_elections, vote_share_agg):
 class EnsembleRunner:
     """Unified orchestrator for ensemble analysis."""
     
-    def __init__(self, config, transitability_graph=None):
+    def __init__(self, config):
         self.config = config
-        self.transitability_graph = transitability_graph
         if 'random_seed' in config.get('initialization', {}):
             set_random_seed(config['initialization']['random_seed'])
         
@@ -113,17 +112,23 @@ class EnsembleRunner:
         self.available_elections = filter_elections(available_elections, years=years, offices=offices)
         self.vote_share_agg = election_config.get('vote_share_agg', 'median')
         
-        transitability_params = config.get('transitability', {})
-        if self.transitability_graph:
-            transitability_params = {**transitability_params, 'precomputed_path': self.transitability_graph}
-        
-        self.graph = create_graph(self.precincts, transitability_params)
+        self.graph = create_graph(self.precincts)
         self.updaters = create_updaters(elections=self.available_elections, election_columns=election_columns, num_muniids=NUM_MUNIIDS, num_countyids=NUM_COUNTYIDS)
         self.initial_partition = create_initial_partition(self.graph, self.precincts, self.updaters)
         
         self.ideal_population = sum(self.initial_partition["population"].values()) / len(self.initial_partition)
-        self.proposal = create_proposal(self.ideal_population, self.precincts, config['region_surcharges'], config['constraints']['pop_deviation'] or 0.001, round(len(self.initial_partition) / 2))
-        self.constraints = create_constraints(self.initial_partition, **config['constraints'])
+        self.proposal = create_proposal(
+            self.ideal_population,
+            self.precincts,
+            config['region_surcharges'],
+            config['constraints']['pop_deviation'] or 0.001,
+            round(len(self.initial_partition) / 2),
+            config['edge_penalties']
+        )
+        self.constraints = create_constraints(
+            self.initial_partition,
+            **config['constraints']
+        )
         
     def run(self, output_dir=None, save_config=True):
         print("Starting ensemble analysis...")

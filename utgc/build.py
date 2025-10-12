@@ -1,49 +1,28 @@
+import os
 from functools import partial
+from typing import Optional, Dict, Tuple, Any
 import random
 import numpy as np
 import pandas as pd
 from gerrychain import Graph, GeographicPartition, updaters, constraints
-import os
 import networkx as nx
+from networkx.algorithms import tree as nx_tree
 from gerrychain.proposals import recom
 from gerrychain.tree import bipartition_tree
 from gerrychain.constraints import contiguous, UpperBound, Validator
 from gerrychain.updaters.locality_split_scores import LocalitySplits
 from gerrychain.metrics import polsby_popper
 
-def create_graph(precincts, transitability_params=None):
+def create_graph(precincts):
     """
     Create GerryChain graph from precincts, pruning edges based on a CSV
     file of removed edges if provided.
     """
     print("Creating graph...")
-    params = transitability_params or {}
-    removed_edges_path = params.get("precomputed_path")  # This path should now point to a CSV
-
     # Always start with the graph from the geodataframe to ensure all geometric
     # attributes like 'shared_perim' are correctly calculated.
     graph = Graph.from_geodataframe(precincts, reproject=False)
     print(f"Base graph created: {len(graph.nodes)} nodes, {len(graph.edges)} edges")
-
-    # If a file of removed edges is provided, prune the base graph.
-    if removed_edges_path:
-        if not os.path.exists(removed_edges_path):
-            raise FileNotFoundError(f"Removed edges file not found: {removed_edges_path}")
-        
-        print(f"Loading and pruning edges from {removed_edges_path}...")
-        try:
-            removed_edges_df = pd.read_csv(removed_edges_path)
-            # Ensure nodes are integers for graph matching if they are loaded as floats
-            edges_to_remove = [
-                (int(u), int(v)) for u, v in removed_edges_df.to_numpy()
-            ]
-            
-            graph.remove_edges_from(edges_to_remove)
-            print(f"Removed {len(edges_to_remove)} edges. Final graph has {len(graph.edges)} edges.")
-        except Exception as e:
-            raise IOError(f"Could not parse or process the removed edges CSV: {e}")
-    else:
-        print("No removed edges file provided. Using the default adjacency graph.")
 
     return graph
 
@@ -171,14 +150,41 @@ def get_county_multi_splits(partition):
     except Exception:
         return 0
 
-def create_proposal(ideal_population, precincts, region_surcharge_params, pop_deviation, node_repeats):
-    """Create ReCom proposal with region surcharges."""
+def create_proposal(ideal_population, precincts, region_surcharge_params, pop_deviation, node_repeats, edge_penalty_params={}):
+    """Create ReCom proposal with region surcharges and optional transitability constraints."""
     print("Creating ReCom proposal...")
     column_mapping = {
         'muni': 'MUNIID', 'county': 'COUNTYID', 'highered': 'HIGHERED_ID',
         'metro': 'METRO_ID', 'school_district': 'SCHDIST_ID',
         'water_region': 'WATER_ID', 'basin': 'BASIN_ID'
     }
+
+    # transit_params is a dictionary where the keys are edge tuples and the values are penalties
+    if edge_penalty_params:
+        print(f"  Edge penalties: {edge_penalty_params}")
+    else:
+        print("  No edge penalties provided.")
+    edge_penalties = {}
+    for path, penalty in edge_penalty_params.items():
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Edge file not found: {path}")
+        
+        edges_df = pd.read_csv(path)
+        for _, row in edges_df.iterrows():
+            u, v = int(row['u']), int(row['v'])
+            edge_penalties[tuple(sorted((u, v)))] = penalty
+    
+    # Create the spanning tree with the edge penalties
+    # ReCom will handle passing region surcharges
+    spanning_tree_fn = partial(
+        random_spanning_tree_with_edge_penalties,
+        edge_penalties=edge_penalties
+    )
+
+    if region_surcharge_params:
+        print(f"  Region surcharges: {region_surcharge_params}")
+    else:
+        print("  No region surcharges provided.")
 
     region_surcharge = {}
     for param_name, surcharge_value in region_surcharge_params.items():
@@ -193,11 +199,64 @@ def create_proposal(ideal_population, precincts, region_surcharge_params, pop_de
         epsilon=pop_deviation, 
         node_repeats=node_repeats,
         region_surcharge=region_surcharge,
-        method=partial(bipartition_tree, max_attempts=1000, allow_pair_reselection=True),
+        method=partial(
+            bipartition_tree,
+            max_attempts=1000,
+            allow_pair_reselection=True,
+            spanning_tree_fn=spanning_tree_fn,
+        ),
     )
-
-    print(f"Region surcharges: {region_surcharge}")
     return proposal
+
+def random_spanning_tree_with_edge_penalties(
+    graph: nx.Graph,
+    region_surcharge: Optional[Dict] = None,
+    edge_penalties: Optional[Dict] = None,
+) -> nx.Graph:
+    """
+    Builds a spanning tree using Kruskal's method with random weights,
+    allowing for region-based surcharges (standard GerryChain behavior) and specific edge penalties (e.g., to impose transitability constraints).
+
+    This function is a flexible replacement for GerryChain's default
+    `random_spanning_tree`, enabling more complex weighting schemes.
+
+    :param graph: The input graph to build the spanning tree from.
+    :param region_surcharge: A dictionary where keys are region identifiers
+        (e.g., 'county_id') and values are surcharges for edges crossing
+        those regional boundaries.
+    :param edge_penalties: A dictionary where keys are edge tuples (u, v)
+        and values are penalty weights to be added to those specific edges.
+        The function checks for edges in a canonical (sorted) form.
+    :returns: The minimum spanning tree based on the calculated random weights.
+    """
+    if region_surcharge is None:
+        region_surcharge = {}
+    if edge_penalties is None:
+        edge_penalties = {}
+
+    for u, v in graph.edges():
+        weight = random.random()
+
+        # Apply region surcharges (GerryChain standard behavior)
+        for key, value in region_surcharge.items():
+            if (
+                graph.nodes[u].get(key) != graph.nodes[v].get(key)
+                or graph.nodes[u].get(key) is None
+                or graph.nodes[v].get(key) is None
+            ):
+                weight += value
+
+        # Apply specific edge penalties from our configuration
+        edge_canonical = tuple(sorted((u, v)))
+        if edge_canonical in edge_penalties:
+            weight += edge_penalties[edge_canonical]
+
+        graph.edges[(u, v)]["random_weight"] = weight
+
+    spanning_tree = nx_tree.minimum_spanning_tree(
+        graph, algorithm="kruskal", weight="random_weight"
+    )
+    return spanning_tree
 
 def assignment_hash(partition):
     """
