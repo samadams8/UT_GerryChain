@@ -121,7 +121,7 @@ class EnsembleRunner:
             self.ideal_population,
             self.precincts,
             config['region_surcharges'],
-            config['constraints']['pop_deviation'] or 0.001,
+            config['constraints']['pop_deviation'] or 0.01,
             round(len(self.initial_partition) / 2),
             config['edge_penalties']
         )
@@ -130,17 +130,30 @@ class EnsembleRunner:
             **config['constraints']
         )
         
-    def run(self, output_dir=None, save_config=True):
+    def run(self, num_steps=5000, visualize_every=100, output_dir=None):
         print("Starting ensemble analysis...")
         self.output_dir = output_dir
         start_partition = self._run_preconditioning()
+
+        tilted_params = self.config.get('tilted_run', {})
         
-        results = self._run_ensemble_internal(start_partition)
-        
+        results = run_ensemble(
+            initial_partition=start_partition,
+            proposal=self.proposal,
+            constraints_list=self.constraints,
+            available_elections=self.available_elections,
+            counties=self.counties,
+            municipalities=self.municipalities,
+            num_steps=num_steps,
+            visualize_every=visualize_every,
+            vote_share_agg=self.vote_share_agg,
+            save_visualization_fn=self._save_visualization,
+            tilted_probability=tilted_params.get('less_compact_probability', 1.0),
+            compactness_score=tilted_params.get('compactness_score', 'cut_edges')
+        )
+
         if output_dir:
             self._save_results(results, output_dir)
-            if save_config:
-                self._save_config(output_dir)
         return results
         
     def _run_preconditioning(self):
@@ -156,7 +169,7 @@ class EnsembleRunner:
         # Build a dictionary of valid arguments for run_preconditioning,
         # filtering out keys like 'enable' that are not part of its signature.
         valid_params = {
-            'steps': precond_config.get('steps', 20),
+            'num_steps': precond_config.get('num_steps', 20),
             'popdev_tolerance': precond_config.get('pop_deviation'),
             'split_munis_tolerance': precond_config.get('split_munis_constraint'),
             'split_counties_tolerance': precond_config.get('split_counties_constraint'),
@@ -176,15 +189,14 @@ class EnsembleRunner:
             **valid_params
         )
         
-        # Re-create the partition to create a clean state without parent history.
-        print("Rehydrating partition from preconditioning result to ensure clean state...")
+        # Re-create the partition to create a clean state without parent history
         rehydrated_partition = GeographicPartition(
             graph=self.graph,
             assignment=optimized_partition.assignment,
             updaters=self.updaters
         )
 
-        # Check if this new, clean partition satisfies all constraints.
+        # Check if this new, clean partition satisfies all constraints
         def _satisfies_all(partition, constraints_list):
             for c in constraints_list:
                 try:
@@ -195,31 +207,11 @@ class EnsembleRunner:
             return True
 
         if _satisfies_all(rehydrated_partition, self.constraints):
-            print("✓ Rehydrated partition is valid and will be used as the starting point.")
             return rehydrated_partition
         else:
-            print("⚠️ WARNING: Preconditioned plan is NOT valid according to the constraints.")
-            print("Falling back to the original initial partition.")
+            print("WARNING: Preconditioned plan is NOT valid according to the constraints")
+            print("Falling back to the original initial partition")
             return self.initial_partition
-        
-    def _run_ensemble_internal(self, start_partition):
-        ensemble_params = self.config['ensemble']
-        tilted_params = self.config.get('tilted_run', {})
-        
-        return run_ensemble(
-            initial_partition=start_partition,
-            proposal=self.proposal,
-            constraints_list=self.constraints,
-            available_elections=self.available_elections,
-            counties=self.counties,
-            municipalities=self.municipalities,
-            num_steps=ensemble_params['steps'],
-            visualize_every=ensemble_params['visualize_every'],
-            vote_share_agg=self.vote_share_agg,
-            save_visualization_fn=self._save_visualization,
-            tilted_probability=tilted_params.get('less_compact_probability', 1.0),
-            compactness_score=tilted_params.get('compactness_score', 'cut_edges')
-        )
     
     def _save_visualization(self, partition, step, step_results, counties=None, municipalities=None):
         """Save visualization for current step."""

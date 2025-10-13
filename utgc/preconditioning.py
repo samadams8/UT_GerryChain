@@ -69,7 +69,7 @@ def run_preconditioning(
     initial_partition,
     proposal,
     popdev_tolerance=0.001,
-    steps=20,
+    num_steps=20,
     split_munis_tolerance=None,
     split_counties_tolerance=None,
     muni_multi_splits_tolerance=None,
@@ -81,7 +81,7 @@ def run_preconditioning(
     region_surcharge_max=None,
 ):
     num_districts = len(initial_partition)
-    print(f"Running preconditioning for {steps} steps...")
+    print(f"Running preconditioning for {num_steps} steps...")
     if split_munis_tolerance is not None and split_counties_tolerance is not None:
         print(
             f"Tolerance thresholds: pop_dev={popdev_tolerance:.4f}, muni_splits={split_munis_tolerance}, county_splits={split_counties_tolerance}"
@@ -143,7 +143,7 @@ def run_preconditioning(
             print("Starting preconditioning...")
 
         for _ in optimizer.short_bursts(
-            5, ceil(steps / 5), with_progress_bar=True):
+            5, ceil(num_steps / 5), with_progress_bar=True):
             pass
 
         print(f"Preconditioned score: {optimizer.best_score}")
