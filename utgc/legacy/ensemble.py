@@ -1,9 +1,9 @@
 from gerrychain import MarkovChain, accept, GeographicPartition
 from gerrychain.optimization import SingleMetricOptimizer
-from .metrics import build_locality_name_maps, compute_split_name_lists, calculate_partisan_metrics
+from ..metrics import build_locality_name_maps, compute_split_name_lists, calculate_partisan_metrics
 from .data_io import load_data, load_county_boundaries, load_municipality_boundaries, get_election_columns, detect_election_data, filter_elections
 from .build import create_graph, create_updaters, create_initial_partition, create_constraints, create_proposal, set_random_seed
-from .preconditioning import run_preconditioning
+from ..preconditioning import run_preconditioning
 from .reporting import save_visualization, save_results, create_summary_plots
 import os
 import yaml

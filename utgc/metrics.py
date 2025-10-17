@@ -52,7 +52,8 @@ def build_locality_name_maps(partition):
     return county_id_to_name, muni_id_to_name
 
 
-def compute_split_name_lists(partition, county_id_to_name, muni_id_to_name):
+def compute_split_name_lists(partition):
+    county_id_to_name, muni_id_to_name = build_locality_name_maps(partition)
     county_to_districts = {}
     for node in partition.graph.nodes:
         node_data = partition.graph.nodes[node]
