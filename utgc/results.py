@@ -1,4 +1,5 @@
 import os
+import json
 import pandas as pd
 from typing import Dict, Any
 
@@ -12,21 +13,17 @@ class ResultSet:
     This object holds the summary DataFrame of all generated plans and provides
     methods for analysis, plotting, and saving.
     """
-    def __init__(self, summary_df: pd.DataFrame, metadata: Dict[str, Any], output_dir: str):
+    def __init__(self, output_file: str):
         """
         Initializes the ResultSet.
 
         :param summary_df: A pandas DataFrame where each row represents one
                            districting plan from the ensemble.
-        :param metadata: A dictionary containing configuration details of the run.
-        :param output_dir: The directory where results should be saved.
         """
-        self.summary_df = summary_df
-        self.metadata = metadata
-        self.output_dir = output_dir
+        self.output = json.load(open(output_file))
         
         print("✓ ResultSet created.")
-        print(f"  - Contains results for {len(self.summary_df)} plans.")
+        print(f"  - Contains results for {len(self.output)} plans.")
 
     def __repr__(self) -> str:
         """Provides a string representation of the ResultSet."""

@@ -202,7 +202,7 @@ class EnsembleRunner:
             pop_col="TOTPOP",
             pop_target=ideal_population,
             epsilon=self.pop_tolerance,
-            node_repeats=ceil(sqrt(num_districts)),
+            node_repeats=num_districts,
             region_surcharge=self._region_surcharges,
             method=partial(
                 bipartition_tree,
@@ -246,7 +246,7 @@ class EnsembleRunner:
         -------
         self
         """
-        if num_split:
+        if num_split is not None:
             constraint_name = f"split_{name}"
             self._constraints.append(UpperBound(
                     lambda p: p[constraint_name],
@@ -254,7 +254,7 @@ class EnsembleRunner:
                 ))
             self._constraint_params[constraint_name] = num_split
             print(f"Constraint: split max {num_split} {name}")
-        if num_multi_splits:
+        if num_multi_splits is not None:
             constraint_name = f"{name}_multi_splits"
             self._constraints.append(UpperBound(
                     lambda p: p[constraint_name],
@@ -419,18 +419,22 @@ class EnsembleRunner:
         return self
     
     # Callbacks
-    def runtime_callback(self, name: str, frequency: int = 1, action: Callable = None) -> 'EnsembleRunner':
+    def add_runtime_callback(self,
+        name: str,
+        frequency: int = 1,
+        action: Callable[[Partition, int, str], None] = None,
+    ) -> 'EnsembleRunner':
         if frequency <= 0:
             raise ValueError("Callback frequency must be a positive integer.")
         if not action:
             raise ValueError("Callback action must be provided.")
 
         self._callbacks[name] = {"frequency": frequency, "action": action}
-        print(f"Registered callback: '{action.__name__}' to run every {frequency} steps.")
+        print(f"Registered callback '{name}' ({action.__name__}) to run every {frequency} steps.")
 
         return self
 
-    # --- Internal Builder Methods (remain the same) ---
+    # --- Internal Builder Methods ---
     def _load_geodata(self,
         pop_geodata_path: str,
         initial_plan_path: str,
@@ -579,12 +583,18 @@ class EnsembleRunner:
 
     # --- Run Execution ---
     def run(self,
+        name: Optional[str] = None,
         num_steps: int = 5000,
         output_dir: Optional[str] = None,
         use_preconditioned_partition: bool = True,
     ):
-        self._steps = num_steps
-        print("=== MCMC Ensemble Run ===")
+        if name is None:
+            save_dir = output_dir
+        else:
+            save_dir = os.path.join(output_dir, name)
+            os.makedirs(save_dir, exist_ok=True)
+
+        print(f"=== MCMC Ensemble Run {name if name else ''} ===")
 
         if use_preconditioned_partition:
             if not self.preconditioned_partition:
@@ -653,11 +663,11 @@ class EnsembleRunner:
             }
         }
 
-        with open(os.path.join(output_dir, "config.yaml"), "w") as f:
+        with open(os.path.join(save_dir, "config.yaml"), "w") as f:
             yaml.safe_dump(metadata, f, sort_keys=False)
         
         # Set results path and open file for writing
-        output_file = os.path.join(output_dir, "output.jsonl")
+        output_file = os.path.join(save_dir, "output.jsonl")
         output_file_handle = open(output_file, "w")
         print("Running Markov chain...")
         for iter, partition in enumerate(partition_iterator):
@@ -674,19 +684,17 @@ class EnsembleRunner:
                 value = partition[updater_name]
                 if isinstance(value, dict):
                     # Sort the dictionary by key
-                    data[updater_name] = {k: v for k, v in sorted(value.items())}
+                    data[updater_name] = {
+                        k: v for k, v in sorted(value.items())
+                    }
                 else:
                     data[updater_name] = value
             output_file_handle.write(json.dumps(data) + "\n")
             output_file_handle.flush()
 
             # Run callbacks
-            for callback in self._callbacks:
-                if step_number % callback['frequency'] == 0:
-                    callback['action'](
-                        partition=partition,
-                        step=step_number,
-                        output_dir=output_dir
-                    )
+            for key, value in self._callbacks.items():
+                if step_number % value['frequency'] == 0:
+                    value['action'](partition, step_number, save_dir)
                     
         output_file_handle.close()
