@@ -3,8 +3,9 @@ import pandas as pd
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import seaborn as sns
+import numpy as np
 from gerrychain import GeographicPartition
-from typing import List, Optional
+from typing import List, Optional, Dict, Any, Union
 
 def plot_partisan_summary(summary_df: pd.DataFrame, elections: List[str], output_dir: str):
     """
@@ -216,3 +217,372 @@ def visualize_partition(
     os.makedirs(output_dir, exist_ok=True)
     plt.savefig(os.path.join(output_dir, f"step_{step:05d}.png"), dpi=300, bbox_inches='tight', facecolor='white')
     plt.close()
+
+def plot_time_series(df: pd.DataFrame,
+metric_names: Union[str, List[str]],
+output_path: str, 
+sort_districts: bool = False,
+line_styles: Optional[List[str]] = None):
+    """
+    Plot time series of one or more metrics over steps.
+    
+    :param df: DataFrame containing the ensemble data
+    :param metric_names: Name(s) of the metric(s) to plot
+    :param output_path: Path to save the plot
+    :param sort_districts: If True, sort district values at each step
+    :param line_styles: Optional list of line styles for multiple metrics
+    """
+    # Handle single metric as string
+    if isinstance(metric_names, str):
+        metric_names = [metric_names]
+    
+    # Validate all metrics exist
+    for metric_name in metric_names:
+        if metric_name not in df.columns:
+            raise ValueError(f"Metric '{metric_name}' not found in data")
+    
+    plt.figure(figsize=(12, 8))
+    
+    # Default line styles
+    if line_styles is None:
+        line_styles = ['-', '--', '-.', ':', '-', '--', '-.', ':']
+    
+    # Ensure we have enough line styles
+    while len(line_styles) < len(metric_names):
+        line_styles.extend(['-', '--', '-.', ':'])
+    
+    colors = plt.colormaps['tab10'](np.linspace(0, 1, len(metric_names)))
+    
+    for i, metric_name in enumerate(metric_names):
+        # Check if metric is district-level (dict) or map-level (scalar)
+        sample_value = df[metric_name].dropna().iloc[0] if not df[metric_name].dropna().empty else None
+        
+        if isinstance(sample_value, dict):
+            # District-level metric
+            if sort_districts:
+                # Sort districts at each step
+                sorted_data = []
+                for _, row in df.iterrows():
+                    if pd.notna(row[metric_name]) and isinstance(row[metric_name], dict):
+                        sorted_values = sorted(row[metric_name].values())
+                        sorted_data.append(sorted_values)
+                    else:
+                        sorted_data.append([])
+                
+                # Create DataFrame for sorted data
+                max_districts = max(len(step_data) for step_data in sorted_data) if sorted_data else 0
+                sorted_df = pd.DataFrame(sorted_data, columns=[f'Rank_{i+1}' for i in range(max_districts)])
+                
+                # Plot each rank
+                for j, col in enumerate(sorted_df.columns):
+                    if not sorted_df[col].dropna().empty:
+                        plt.plot(df['step'], sorted_df[col], 
+                               linestyle=line_styles[i % len(line_styles)],
+                               color=colors[i], 
+                               label=f'{metric_name} - {col}', 
+                               alpha=0.7)
+            else:
+                # Plot each district separately
+                all_districts = set()
+                for _, row in df.iterrows():
+                    if pd.notna(row[metric_name]) and isinstance(row[metric_name], dict):
+                        all_districts.update(row[metric_name].keys())
+                
+                # Create district-specific colors and styles
+                district_colors = plt.colormaps['tab10'](np.linspace(0, 1, len(all_districts)))
+                district_styles = ['-', '--', '-.', ':', '-', '--', '-.', ':']
+                
+                for j, district in enumerate(sorted(all_districts)):
+                    values = []
+                    for _, row in df.iterrows():
+                        if pd.notna(row[metric_name]) and isinstance(row[metric_name], dict):
+                            values.append(row[metric_name].get(district, np.nan))
+                        else:
+                            values.append(np.nan)
+                    
+                    if not all(pd.isna(values)):
+                        plt.plot(df['step'], values, 
+                               linestyle=district_styles[j % len(district_styles)],
+                               color=district_colors[j],
+                               label=f'{metric_name} - District {district}', 
+                               alpha=0.7)
+        else:
+            # Map-level metric
+            plt.plot(df['step'], df[metric_name], 
+                   linestyle=line_styles[i % len(line_styles)],
+                   color=colors[i],
+                   linewidth=2, 
+                   label=metric_name)
+    
+    plt.xlabel('Step')
+    if len(metric_names) == 1:
+        plt.ylabel(metric_names[0])
+        plt.title(f'{metric_names[0]} Over Time')
+    else:
+        plt.ylabel('Value')
+        plt.title(f'Multiple Metrics Over Time')
+    
+    plt.grid(True, alpha=0.3)
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    plt.tight_layout()
+    # Ensure output directory exists
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✓ Time series plot saved to {os.path.basename(output_path)}")
+
+def draw_time_series(ax, df: pd.DataFrame, metric_names: Union[str, List[str]], 
+                    sort_districts: bool = False, line_styles: Optional[List[str]] = None):
+    """
+    Draw time series plot on the given axes.
+    
+    :param ax: Matplotlib axes to draw on
+    :param df: DataFrame containing the ensemble data
+    :param metric_names: Name(s) of the metric(s) to plot
+    :param sort_districts: If True, sort district values at each step
+    :param line_styles: Optional list of line styles for multiple metrics
+    """
+    # Handle single metric as string
+    if isinstance(metric_names, str):
+        metric_names = [metric_names]
+    
+    # Validate all metrics exist
+    for metric_name in metric_names:
+        if metric_name not in df.columns:
+            raise ValueError(f"Metric '{metric_name}' not found in data")
+    
+    # Default line styles
+    if line_styles is None:
+        line_styles = ['-', '--', '-.', ':', '-', '--', '-.', ':']
+    
+    # Ensure we have enough line styles
+    while len(line_styles) < len(metric_names):
+        line_styles.extend(['-', '--', '-.', ':'])
+    
+    colors = plt.colormaps['tab10'](np.linspace(0, 1, len(metric_names)))
+    
+    for i, metric_name in enumerate(metric_names):
+        # Check if metric is district-level (dict) or map-level (scalar)
+        sample_value = df[metric_name].dropna().iloc[0] if not df[metric_name].dropna().empty else None
+        
+        if isinstance(sample_value, dict):
+            # District-level metric
+            if sort_districts:
+                # Sort districts at each step
+                sorted_data = []
+                for _, row in df.iterrows():
+                    if pd.notna(row[metric_name]) and isinstance(row[metric_name], dict):
+                        sorted_values = sorted(row[metric_name].values())
+                        sorted_data.append(sorted_values)
+                    else:
+                        sorted_data.append([])
+                
+                # Create DataFrame for sorted data
+                max_districts = max(len(step_data) for step_data in sorted_data) if sorted_data else 0
+                sorted_df = pd.DataFrame(sorted_data, columns=[f'Rank_{i+1}' for i in range(max_districts)])
+                
+                # Plot each rank
+                for j, col in enumerate(sorted_df.columns):
+                    if not sorted_df[col].dropna().empty:
+                        ax.plot(df['step'], sorted_df[col], 
+                               linestyle=line_styles[i % len(line_styles)],
+                               color=colors[i], 
+                               label=f'{metric_name} - {col}', 
+                               alpha=0.7)
+            else:
+                # Plot each district separately
+                all_districts = set()
+                for _, row in df.iterrows():
+                    if pd.notna(row[metric_name]) and isinstance(row[metric_name], dict):
+                        all_districts.update(row[metric_name].keys())
+                
+                # Create district-specific colors and styles
+                district_colors = plt.colormaps['tab10'](np.linspace(0, 1, len(all_districts)))
+                district_styles = ['-', '--', '-.', ':', '-', '--', '-.', ':']
+                
+                for j, district in enumerate(sorted(all_districts)):
+                    values = []
+                    for _, row in df.iterrows():
+                        if pd.notna(row[metric_name]) and isinstance(row[metric_name], dict):
+                            values.append(row[metric_name].get(district, np.nan))
+                        else:
+                            values.append(np.nan)
+                    
+                    if not all(pd.isna(values)):
+                        ax.plot(df['step'], values, 
+                               linestyle=district_styles[j % len(district_styles)],
+                               color=district_colors[j],
+                               label=f'{metric_name} - District {district}', 
+                               alpha=0.7)
+        else:
+            # Map-level metric
+            ax.plot(df['step'], df[metric_name], 
+                   linestyle=line_styles[i % len(line_styles)],
+                   color=colors[i],
+                   linewidth=2, 
+                   label=metric_name)
+    
+    ax.set_xlabel('Step')
+    if len(metric_names) == 1:
+        ax.set_ylabel(metric_names[0])
+        ax.set_title(f'{metric_names[0]} Over Time')
+    else:
+        ax.set_ylabel('Value')
+        ax.set_title('Multiple Metrics Over Time')
+    
+    ax.grid(True, alpha=0.3)
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+def plot_distribution_histogram(values: pd.Series, metric_name: str, output_path: str, 
+                               reference_values: Optional[List[Any]] = None):
+    """
+    Plot histogram of a map-level metric.
+    
+    :param values: Series of values to plot
+    :param metric_name: Name of the metric
+    :param output_path: Path to save the plot
+    :param reference_values: Optional list of reference values to overlay
+    """
+    plt.figure(figsize=(10, 6))
+    
+    # Create histogram
+    plt.hist(values, bins=30, alpha=0.7, edgecolor='black', density=True)
+    
+    # Add reference lines if provided
+    if reference_values:
+        colors = ['red', 'blue', 'green', 'orange', 'purple']
+        for i, ref_val in enumerate(reference_values):
+            if ref_val is not None:
+                color = colors[i % len(colors)]
+                plt.axvline(ref_val, color=color, linestyle='--', linewidth=2, 
+                           label=f'Reference {i+1}: {ref_val:.3f}')
+    
+    plt.xlabel(metric_name)
+    plt.ylabel('Density')
+    plt.title(f'Distribution of {metric_name}')
+    plt.grid(True, alpha=0.3)
+    
+    if reference_values:
+        plt.legend()
+    
+    plt.tight_layout()
+    # Ensure output directory exists
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✓ Histogram plot saved to {os.path.basename(output_path)}")
+
+def plot_distribution_violin(df: pd.DataFrame, metric_name: str, output_path: str,
+                            reference_values: Optional[List[Dict[str, Any]]] = None,
+                            sort_districts: bool = False):
+    """
+    Plot violin plot of a district-level metric.
+    
+    :param df: DataFrame containing the ensemble data
+    :param metric_name: Name of the metric to plot
+    :param output_path: Path to save the plot
+    :param reference_values: Optional list of reference value dictionaries
+    :param sort_districts: If True, sort district values at each step
+    """
+    if metric_name not in df.columns:
+        raise ValueError(f"Metric '{metric_name}' not found in data")
+    
+    # Extract district-level data
+    district_data = []
+    district_labels = []
+    
+    if sort_districts:
+        # Sort districts at each step
+        for _, row in df.iterrows():
+            if pd.notna(row[metric_name]) and isinstance(row[metric_name], dict):
+                sorted_values = sorted(row[metric_name].values())
+                district_data.append(sorted_values)
+        
+        # Create DataFrame for sorted data
+        max_districts = max(len(step_data) for step_data in district_data) if district_data else 0
+        sorted_df = pd.DataFrame(district_data, columns=[f'Rank_{i+1}' for i in range(max_districts)])
+        
+        # Plot violin plot
+        plt.figure(figsize=(12, 8))
+        sns.violinplot(data=sorted_df, orient='v')
+        plt.xlabel('District Rank')
+        plt.ylabel(metric_name)
+        plt.title(f'Distribution of {metric_name} (Sorted by Rank)')
+        
+    else:
+        # Extract data for each district
+        all_districts = set()
+        for _, row in df.iterrows():
+            if pd.notna(row[metric_name]) and isinstance(row[metric_name], dict):
+                all_districts.update(row[metric_name].keys())
+        
+        district_values = {}
+        for district in sorted(all_districts):
+            values = []
+            for _, row in df.iterrows():
+                if pd.notna(row[metric_name]) and isinstance(row[metric_name], dict):
+                    values.append(row[metric_name].get(district, np.nan))
+                else:
+                    values.append(np.nan)
+            
+            # Remove NaN values
+            clean_values = [v for v in values if not pd.isna(v)]
+            if clean_values:
+                district_values[f'District {district}'] = clean_values
+        
+        if not district_values:
+            raise ValueError(f"No valid data found for metric '{metric_name}'")
+        
+        # Create DataFrame for violin plot
+        plot_data = []
+        for district, values in district_values.items():
+            for value in values:
+                plot_data.append({'District': district, metric_name: value})
+        
+        plot_df = pd.DataFrame(plot_data)
+        
+        plt.figure(figsize=(12, 8))
+        sns.violinplot(data=plot_df, x='District', y=metric_name)
+        plt.xlabel('District')
+        plt.ylabel(metric_name)
+        plt.title(f'Distribution of {metric_name} by District')
+        plt.xticks(rotation=45)
+    
+    # Add reference lines if provided
+    if reference_values:
+        colors = ['red', 'blue', 'green', 'orange', 'purple']
+        for i, ref_dict in enumerate(reference_values):
+            if ref_dict and isinstance(ref_dict, dict):
+                color = colors[i % len(colors)]
+                for district, value in ref_dict.items():
+                    if not pd.isna(value):
+                        if sort_districts:
+                            # For sorted plots, we'd need to determine the rank
+                            # This is a simplified approach
+                            plt.axhline(value, color=color, linestyle='--', alpha=0.7, 
+                                       label=f'Reference {i+1}')
+                        else:
+                            plt.axhline(value, color=color, linestyle='--', alpha=0.7, 
+                                       label=f'Reference {i+1}')
+                break  # Only show one reference line for simplicity
+    
+    plt.grid(True, alpha=0.3)
+    if reference_values:
+        plt.legend()
+    
+    plt.tight_layout()
+    # Ensure output directory exists
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"✓ Violin plot saved to {os.path.basename(output_path)}")

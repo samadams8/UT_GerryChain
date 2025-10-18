@@ -594,7 +594,7 @@ class EnsembleRunner:
             save_dir = os.path.join(output_dir, name)
             os.makedirs(save_dir, exist_ok=True)
 
-        print(f"=== MCMC Ensemble Run {name if name else ''} ===")
+        print(f"=== MCMC {name if name else '\b'} ===")
 
         if use_preconditioned_partition:
             if not self.preconditioned_partition:
