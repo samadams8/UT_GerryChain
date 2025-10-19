@@ -1,5 +1,6 @@
 from codecs import namereplace_errors
 import os
+from warnings import warn
 import maup
 from numpy import str_
 import pandas as pd
@@ -8,6 +9,7 @@ from functools import partial
 import random
 import networkx as nx
 from typing import Iterable, Optional, Dict, Any, List, Callable, Tuple, Literal
+from pandas.core.indexes.accessors import NoNewAttributesMixin
 import yaml
 from math import ceil, sqrt
 import json
@@ -19,7 +21,6 @@ from networkx.algorithms import tree as nx_tree
 from gerrychain.constraints import contiguous, Validator, UpperBound
 from gerrychain.metrics import polsby_popper
 from gerrychain.updaters.locality_split_scores import LocalitySplits
-from tqdm import tqdm
 import numpy as np
 
 from .results import ResultSet
@@ -119,61 +120,92 @@ class NotEqual(Validator):
 class EnsembleRunner:
     def __init__(
         self,
-        pop_geodata_path: Optional[str] = None,
-        initial_plan_path: Optional[str] = None,
+        pop_geodata_path: str,
+        initial_plan_path: str,
         random_seed: Optional[int] = None,
-        config_file: Optional[str] = None,
+        pop_column: Optional[str] = "TOTPOP",
     ): 
-        if config_file:
-            with open(config_file, "r") as f:
-                config = yaml.safe_load(f)
-            
-            for key, value in config.items():
-                pass
-        else:
-            self.init_params = {}
-            if not pop_geodata_path:
-                raise ValueError("Population geodata path must be provided if no config file is provided.")
-            if not initial_plan_path:
-                raise ValueError("Initial plan path must be provided if no config file is provided.")
-        
+        self.init_params = {}
+        if not pop_geodata_path:
+            raise ValueError("Population geodata path must be provided.")
+        if not initial_plan_path:
+            raise ValueError("Initial plan path must be provided.")
+        self.init_params["pop_geodata_path"] = pop_geodata_path
+        self.init_params["initial_plan_path"] = initial_plan_path
         if random_seed:
             self.init_params["random_seed"] = random_seed
             random.seed(random_seed)
 
-        self.init_params["pop_geodata_path"] = pop_geodata_path
-        self.init_params["initial_plan_path"] = initial_plan_path
-
         self.geodata, self.initial_plan = self._load_geodata(pop_geodata_path, initial_plan_path)
         self.graph = Graph.from_geodataframe(self.geodata)
 
-        print(f"Graph built with {len(self.graph.nodes)} nodes, {len(self.graph.edges)} edges")
+        total_population = sum(self.geodata[pop_column])
+        num_districts = len(self.initial_plan)
 
-        self._constraint_params = {}
-        self._constraints = [contiguous,]
+        print(f"  Graph built with {len(self.graph.nodes)} nodes, {len(self.graph.edges)} edges")
+
+        self._population_params = {
+            "column_id": pop_column,
+            "total_pop": total_population,
+            "num_districts": num_districts,
+            "ideal_pop": total_population / num_districts,
+            "pop_tolerance": 0.01,
+        }
+
+        # Record which constructors were used to create the runner
+        self._construction_history = []
 
         # self._region_surcharge_params = {}
         self._region_surcharges = {}
         self._region_name_to_column = {}
         self._edge_penalty_params = {}
         self._edge_penalties = {}
+
+        self._constraint_params = {}
+        self._constraints = [contiguous,]
+
         self._tilted_run_params = {}
-        self._precondition_params = {}
         # Updaters to ignore from the output file
         self._ignored_updaters = set()
 
+        self._precondition_params = {}
         self.preconditioned_partition = None
 
         self._callbacks = {}
 
         self._updaters = {
-            "population": updaters.Tally("TOTPOP", alias="population"),
+            "population": updaters.Tally(pop_column, alias="population"),
         }
+
+    @classmethod
+    def from_config(cls, config_path: str) -> 'EnsembleRunner':
+        print(f"Initializing runner from configuration: {config_path}")
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+
+        init_params = config.get('initialization', {})
+        runner = cls(
+            pop_geodata_path=init_params.get('pop_geodata_path'),
+            initial_plan_path=init_params.get('initial_plan_path'),
+            random_seed=init_params.get('random_seed')
+        )
+
+        # Iterate over the entries in the construction history and call the corresponding method
+        for entry in config.get('construction', []):
+            method = entry['method']
+            kwargs = entry['kwargs']
+            getattr(runner, method)(**kwargs)
+
+        # Remind the user that run parameters cannot be initialized from a config file
+        if 'run' in config:
+            print(f"!!!Config included run parameters: {config['run']}. Note that run parameters are passed as arguments to precondition() and run().")
+
+        return runner
 
     # Convenience computed properties
     @property
     def pop_tolerance(self) -> float:
-        return self._constraint_params.get("pop_deviation", 0.01)
+        return self._population_params.get("pop_tolerance", 0.01)
     
     @property
     def initial_partition(self) -> Partition:
@@ -187,8 +219,8 @@ class EnsembleRunner:
         if not initial_partition:
             initial_partition = self.initial_partition
 
-        ideal_population = sum(initial_partition["population"].values()) / len(initial_partition)
         num_districts = len(initial_partition)
+        ideal_population = self._population_params["ideal_pop"]
 
         # Spanning tree function including edge penalites
         # nb region surcharges are passed down by the caller
@@ -199,7 +231,7 @@ class EnsembleRunner:
 
         proposal = partial(
             recom,
-            pop_col="TOTPOP",
+            pop_col=self._population_params["column_id"],
             pop_target=ideal_population,
             epsilon=self.pop_tolerance,
             node_repeats=num_districts,
@@ -213,13 +245,20 @@ class EnsembleRunner:
         )
         return proposal
 
-    # Constraints
-    def constrain_population_deviation(self, pop_deviation: float = 0.01) -> 'EnsembleRunner':
-        """Constrain the population deviation to a given tolerance."""
-        self._constraint_params["pop_deviation"] = pop_deviation
-        print(f"Constraint: max +/- {pop_deviation:%} population deviation")
+    # Population
+    def set_pop_dev_tolerance(self, tolerance: float = 0.01) -> 'EnsembleRunner':
+        # Record the construction history
+        self._construction_history.append({
+            "method": "set_pop_dev_tolerance",
+            "kwargs": { "tolerance": tolerance }
+        })
+
+        self._population_params["pop_tolerance"] = tolerance
+        print(f"Population deviation tolerance: {tolerance:%}")
+
         return self
-    
+
+    # Constraints
     def constrain_region_splits(self,
         name: Optional[str] = None,
         column_id: Optional[str] = None,
@@ -246,6 +285,22 @@ class EnsembleRunner:
         -------
         self
         """
+        # Record the construction history
+        self._construction_history.append({
+            "method": "constrain_region_splits",
+            "kwargs": {
+                "name": name,
+                "column_id": column_id,
+                "num_split": num_split,
+                "num_multi_splits": num_multi_splits,
+                # Override the create_updater parameter--the updater creation will be stored in the construction history, if it was created
+                "create_updater": False,
+            }
+        })
+
+        if not name:
+            name = column_id
+
         if num_split is not None:
             constraint_name = f"split_{name}"
             self._constraints.append(UpperBound(
@@ -265,7 +320,7 @@ class EnsembleRunner:
 
         if create_updater:
             self.add_locality_splits_updater(name=name, column_id=column_id)
-        
+
         return self
 
     def constrain_not_equal(self,
@@ -273,7 +328,18 @@ class EnsembleRunner:
         create_updater: bool = True,
         ignore_output: bool = True,
     ) -> 'EnsembleRunner':
+        # Record the construction history
+        self._construction_history.append({
+            "method": "constrain_not_equal",
+            "kwargs": {
+                "not_equal_constraint": not_equal_constraint,
+                "create_updater": create_updater,
+                "ignore_output": ignore_output
+            }
+        })
+
         self._constraint_params["not_equal_constraint"] = not_equal_constraint
+
         if not_equal_constraint:
             self._constraints.append(NotEqual())
             print(f"Constraint: prevent same map from being generated twice in a row")
@@ -286,7 +352,7 @@ class EnsembleRunner:
         else:
             self._constraints.remove(NotEqual())
             print(f"Constraint: allow same map to be generated twice in a row")
-
+        
         return self
 
     # Region surcharges
@@ -294,10 +360,21 @@ class EnsembleRunner:
         column_id: str,
         surcharge: float,
     ) -> 'EnsembleRunner':
-        if surcharge > 0:
-            # self._region_surcharge_params[column_id] = surcharge
-            self._region_surcharges[column_id] = surcharge
+        if surcharge <= 0:
+            return self
+
+        # Record the construction history
+        self._construction_history.append({
+            "method": "surcharge_region",
+            "kwargs": {
+                "column_id": column_id,
+                "surcharge": surcharge
+            }
+        })
+
+        self._region_surcharges[column_id] = surcharge
         print(f"Surcharge: {surcharge} for {column_id}")
+
         return self
 
     # Edge penalties
@@ -307,20 +384,30 @@ class EnsembleRunner:
     ) -> 'EnsembleRunner':
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"Edge file not found: {csv_path}")
+        if penalty <= 0:
+            return self
         
-        if penalty > 0:
-            self._edge_penalty_params[csv_path] = penalty
+        # Record the construction history
+        self._construction_history.append({
+            "method": "penalize_edges_from_csv",
+            "kwargs": {
+                "csv_path": csv_path,
+                "penalty": penalty
+            },
+        })
 
-            edges_df = pd.read_csv(csv_path)
-            for _, row in edges_df.iterrows():
-                # Check whether the edge already has a penalty assigned
-                edge = tuple(sorted((int(row["u"]), int(row["v"]))))
-                if edge in self._edge_penalties:
-                    # Add the penalty to the existing penalty
-                    self._edge_penalties[edge] += penalty
-                else:
-                    # Assign the penalty to the edge
-                    self._edge_penalties[edge] = penalty
+        edges_df = pd.read_csv(csv_path)
+        for _, row in edges_df.iterrows():
+            # Check whether the edge already has a penalty assigned
+            edge = tuple(sorted((int(row["u"]), int(row["v"]))))
+            if edge in self._edge_penalties:
+                # Add the penalty to the existing penalty
+                self._edge_penalties[edge] += penalty
+            else:
+                # Assign the penalty to the edge
+                self._edge_penalties[edge] = penalty
+
+        self._edge_penalty_params[csv_path] = penalty
 
         print(f"Penalizing edges from {os.path.basename(csv_path)} with weight {penalty}")
 
@@ -332,14 +419,24 @@ class EnsembleRunner:
         column_id: str = "",
         ignore_ls_output: bool = True,
     ) -> 'EnsembleRunner':
+        # Record the construction history
+        self._construction_history.append({
+            "method": "add_locality_splits_updater",
+            "kwargs": {
+                "name": name,
+                "column_id": column_id,
+                "ignore_ls_output": ignore_ls_output
+            },
+        })
+
         if not name:
             name = column_id
         ls_name = f"ls_{name}"
         self._updaters[ls_name] = LocalitySplits(
-            name=f"ls_{name}",
+            name=ls_name,
             col_id=column_id,
-            pop_col="TOTPOP",
-            scores_to_compute=["num_split_localities", "num_parts"]
+            pop_col=self._population_params["column_id"],
+            scores_to_compute=["num_split_localities", "num_parts"],
         )
         print(f"  Added locality split updater: '{ls_name}'")
         if ignore_ls_output:
@@ -366,16 +463,45 @@ class EnsembleRunner:
         name: str,
         parties_to_columns: Dict[str, str],
     ) -> 'EnsembleRunner':
-        pass
+        # Record the construction history
+        self._construction_history.append({
+            "method": "add_election_updater",
+            "kwargs": {
+                "name": name,
+                "parties_to_columns": parties_to_columns
+            },
+        })
+
+        self._updaters[name] = updaters.Election(
+            name=name,
+            parties_to_columns=parties_to_columns,
+        )
+        print(f"  Added election updater: '{name}'")
+
+        return self
 
     def add_updater_function(self,
         name: str,
         function: Callable[[Partition], Any],
         ignore_output: bool = False,
     ) -> 'EnsembleRunner':
+        if isinstance(function, str):
+            print(f"!!! Updater function '{name} ({function})' is a string. This usually occurs when restoring a runner from a config file. Please use .add_updater_function() to add this function manually.")
+            return self
+
+        # Record the construction history
+        self._construction_history.append({
+            "method": "add_updater_function",
+            "kwargs": {
+                "name": name,
+                "function": function.__name__,
+                "ignore_output": ignore_output
+            },
+        })
+    
         if name in self._updaters:
             print(f"Updater function '{name}' already exists. Overwriting...")
-        self._updaters[name] = function
+        self._updaters[name] = function.__name__
         print(f"  Added updater function: '{name}'")
 
         if ignore_output: 
@@ -398,6 +524,15 @@ class EnsembleRunner:
         less_compact_probability: float = 1.0,
         compactness_score: Literal["cut_edges", "polsby_popper"] = "polsby_popper"
     ) -> 'EnsembleRunner':
+        # Record the construction history
+        self._construction_history.append({
+            "method": "make_tilted_run",
+            "kwargs": {
+                "less_compact_probability": less_compact_probability,
+                "compactness_score": compactness_score
+            }
+        })
+
         if less_compact_probability < 1.0:
             self._tilted_run_params["less_compact_probability"] = less_compact_probability
             self._tilted_run_params["compactness_score"] = compactness_score
@@ -428,6 +563,19 @@ class EnsembleRunner:
             raise ValueError("Callback frequency must be a positive integer.")
         if not action:
             raise ValueError("Callback action must be provided.")
+        if isinstance(action, str):
+            print(f"!!! Callback action '{name} ({action})' is a string. This usually occurs when restoring a runner from a config file. Please use .add_runtime_callback() to add this action manually.")
+            return self
+
+        # Record the construction history
+        self._construction_history.append({
+            "method": "add_runtime_callback",
+            "kwargs": {
+                "name": name,
+                "frequency": frequency,
+                "action": action.__name__
+            },
+        })
 
         self._callbacks[name] = {"frequency": frequency, "action": action}
         print(f"Registered callback '{name}' ({action.__name__}) to run every {frequency} steps.")
@@ -484,7 +632,7 @@ class EnsembleRunner:
     # --- Preconditioning Method ---
     def precondition(self,
         steps: int = 50,
-        max_attempts: int = 10,
+        max_attempts: int = 1,
     ) -> 'EnsembleRunner':
         """
         Runs a preconditioning phase to find a better starting plan.
@@ -506,13 +654,11 @@ class EnsembleRunner:
         proposal = self._proposal(initial_partition)
 
         # Define metrics for the optimization objective
-        total_population = sum(initial_partition["population"].values())
-        ideal_population = total_population / len(initial_partition)
         def _optimization_metric(partition):
             def _pop_dev(partition):
                 max_deviation = 0
                 for pop in partition["population"].values():
-                    max_deviation = max(max_deviation, abs(float(pop) - ideal_population) / ideal_population)
+                    max_deviation = max(max_deviation, abs(float(pop) - self._population_params["ideal_pop"]) / self._population_params["ideal_pop"])
                 return max_deviation
 
             def _ceiling_objective(value, ceiling):
@@ -541,9 +687,13 @@ class EnsembleRunner:
             else:
                 print("Starting preconditioning...")
 
+            constraints = [contiguous,]
+            if "not_equal_constraint" in self._constraint_params and self._constraint_params["not_equal_constraint"] is True:
+                constraints.append(NotEqual())
+
             optimizer = optimization.SingleMetricOptimizer(
                 proposal=proposal,
-                constraints=[contiguous,],
+                constraints=constraints,
                 initial_state=initial_partition,
                 optimization_metric=_optimization_metric,
                 maximize=False,
@@ -559,6 +709,7 @@ class EnsembleRunner:
 
             # If the optimized partition passes all constraints, return it
             passed_constraints = [c(optimized_partition) for c in self._constraints]
+            # print(f"  Passed constraints: {passed_constraints}")
             if all(passed_constraints):
                 print("  Preconditioning successful! All tolerances met.")
                 break
@@ -614,9 +765,9 @@ class EnsembleRunner:
             )
 
             if self._tilted_run_params["compactness_score"] == "cut_edges":
-                optim = lambda partition: len(partition["cut_edges"])
+                optim = lambda p: len(p["cut_edges"])
             elif self._tilted_run_params["compactness_score"] == "polsby_popper":
-                optim = lambda partition: sum(partition["polsby_popper"].values())
+                optim = lambda p: sum(p["polsby_popper"].values())
 
             optimizer = optimization.SingleMetricOptimizer(
                 proposal=proposal,
@@ -649,18 +800,20 @@ class EnsembleRunner:
         # Save run configuration
         metadata = {
             "initialization": self.init_params,
-            "constraints": self._constraint_params,
+            "population": self._population_params,
             "region_surcharges": self._region_surcharges,
             "edge_penalties": self._edge_penalty_params,
             "tilted_run": self._tilted_run_params,
             "updater_names": list(self._updaters.keys()),
             "ignored_updaters": list(self._ignored_updaters),
+            "constraints": self._constraint_params,
             "callback_names": list(self._callbacks.keys()),
             "run": {
                 "num_steps": num_steps,
                 "use_preconditioned_partition": use_preconditioned_partition,
                 "preconditioning": self._precondition_params,
-            }
+            },
+            "construction": self._construction_history,
         }
 
         with open(os.path.join(save_dir, "config.yaml"), "w") as f:
@@ -693,7 +846,7 @@ class EnsembleRunner:
             output_file_handle.flush()
 
             # Run callbacks
-            for key, value in self._callbacks.items():
+            for _, value in self._callbacks.items():
                 if step_number % value['frequency'] == 0:
                     value['action'](partition, step_number, save_dir)
                     
