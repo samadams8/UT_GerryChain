@@ -39,11 +39,14 @@ Output columns
 - HIGHERED_ID
 - METRO_ID
 - SCHDIST_ID
+- BASIN_ID
+- WATER_ID
+- RESERVATION_ID
+- MILITARY_ID
 # Election results
-Format YYOOOP
+- Individual candidate columns for statewide offices
 - Years (2016, 2018, 2020, 2024)
 - Offices (PRE, GOV, ATG, AUD, TRE, USS)
-- Parties (D, R, O)
 """
 
 import os
@@ -141,7 +144,7 @@ def assign_coi_to_precincts(precincts, coi_data):
     print("Assigning Communities of Interest to precincts...")
     
     # Initialize COI columns with blank string (not assigned)
-    coi_columns = ['HIGHERED_ID', 'METRO_ID', 'SCHDIST_ID', 'BASIN_ID', 'WATER_ID']
+    coi_columns = ['HIGHERED_ID', 'METRO_ID', 'SCHDIST_ID', 'BASIN_ID', 'WATER_ID', 'RESERVATION_ID', 'MILITARY_ID']
     for col in coi_columns:
         precincts[col] = ''
     
@@ -321,6 +324,44 @@ def load_coi_data():
         print("    Warning: Water Planning Areas file not found")
         coi_data['WATER_ID'] = None
     
+    # Indian Reservations
+    print("  Processing Indian Reservations...")
+    surface_mgmt_path = "data/cois/UT_SurfaceManagementAgency/BLM_UT_Surface_Management_Agency_(Polygon).shp"
+    if os.path.exists(surface_mgmt_path):
+        surface_mgmt = gpd.read_file(surface_mgmt_path)
+        # Filter for Indian Reservations
+        reservations = surface_mgmt[surface_mgmt['DESIG'] == 'Indian Reservation'].copy()
+        if len(reservations) > 0:
+            # Reset index to ensure 0-based indexing for maup.assign
+            reservations = reservations.reset_index(drop=True)
+            reservations['RESERVATION_ID'] = range(1, len(reservations) + 1)
+            coi_data['RESERVATION_ID'] = reservations[['geometry', 'RESERVATION_ID']]
+            print(f"    Found {len(reservations)} Indian Reservations")
+        else:
+            print("    No Indian Reservations found")
+            coi_data['RESERVATION_ID'] = None
+    else:
+        print("    Warning: Surface Management Agency file not found")
+        coi_data['RESERVATION_ID'] = None
+    
+    # Military Installations
+    print("  Processing Military Installations...")
+    if os.path.exists(surface_mgmt_path):
+        # Filter for Military installations
+        military = surface_mgmt[surface_mgmt['DESIG'] == 'Military'].copy()
+        if len(military) > 0:
+            # Reset index to ensure 0-based indexing for maup.assign
+            military = military.reset_index(drop=True)
+            military['MILITARY_ID'] = range(1, len(military) + 1)
+            coi_data['MILITARY_ID'] = military[['geometry', 'MILITARY_ID']]
+            print(f"    Found {len(military)} Military Installations")
+        else:
+            print("    No Military Installations found")
+            coi_data['MILITARY_ID'] = None
+    else:
+        print("    Warning: Surface Management Agency file not found")
+        coi_data['MILITARY_ID'] = None
+    
     return coi_data
 
 def load_municipality_data():
@@ -328,7 +369,7 @@ def load_municipality_data():
     print("Loading municipality data...")
     
     # Municipalities
-    muni_path = "data/cois/UtahMunicipalBoundaries/Municipalities.shp"
+    muni_path = "data/geography/UtahMunicipalBoundaries/Municipalities.shp"
     if os.path.exists(muni_path):
         municipalities = gpd.read_file(muni_path)
         return municipalities
@@ -379,7 +420,7 @@ def main():
         'NH_NHPI': 0, 'NH_OTHER': 0, 'NH_2MORE': 0,
         'HISP': 0, 'H_WHITE': 0, 'H_BLACK': 0, 'H_AMIN': 0,
         'H_ASIAN': 0, 'H_NHPI': 0, 'H_OTHER': 0, 'H_2MORE': 0,
-        'HIGHERED_ID': '', 'METRO_ID': '', 'SCHDIST_ID': '', 'BASIN_ID': '', 'WATER_ID': ''
+        'HIGHERED_ID': '', 'METRO_ID': '', 'SCHDIST_ID': '', 'BASIN_ID': '', 'WATER_ID': '', 'RESERVATION_ID': '', 'MILITARY_ID': ''
     }
     
     for col, default_val in required_columns.items():

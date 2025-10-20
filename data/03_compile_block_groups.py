@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Utah block dataset compilation for GerryChain analysis
+Utah block group dataset compilation for GerryChain analysis
 
-This script combines:
-- Election data (2016, 2018, 2020, 2024) at census block level
-- Demographic data (race, ethnicity)
-- County and municipality assignments
-- Communities of Interest (COI) assignments
-- All data formatted for GerryChain compatibility
-
-Save to data/UT_blocks.geojson
+This script converts block-level data to block group level by:
+- Loading existing UT_blocks.geojson
+- Loading block group boundaries
+- Aggregating block data to block groups using maup
+- Reassigning Communities of Interest (COI) to block groups
+- Saving as UT_block_groups.geojson
 
 Output columns
 --------------
@@ -63,98 +61,74 @@ warnings.filterwarnings('ignore')
 # Import maup for spatial operations
 import maup
 
-def load_census_demographics():
-    """Load and process census demographic data from PL94-171 tables."""
-    print("Loading census demographic data...")
+def load_block_data():
+    """Load the existing block-level data."""
+    print("Loading block-level data...")
     
-    # Load P1 (total population) data
-    p1_path = "data/raw/ut_pl2020_b/ut_pl2020_p1_b.shp"
-    p1 = gpd.read_file(p1_path)
-    
-    # Load P2 (race) data  
-    p2_path = "data/raw/ut_pl2020_b/ut_pl2020_p2_b.shp"
-    p2 = gpd.read_file(p2_path)
-    
-    # Load P3 (ethnicity) data
-    p3_path = "data/raw/ut_pl2020_b/ut_pl2020_p3_b.shp"
-    p3 = gpd.read_file(p3_path)
-    
-    # Load P4 (voting age population) data
-    p4_path = "data/raw/ut_pl2020_b/ut_pl2020_p4_b.shp"
-    p4 = gpd.read_file(p4_path)
-    
-    # Start with P1 as base (contains GEOID20 and total population)
-    blocks = p1[['GEOID20', 'geometry']].copy()
-    
-    # Add total population from P1
-    blocks['TOTPOP'] = p1['P0010001']  # Total population
-    
-    # Add voting age population from P4
-    blocks['VAP'] = p4['P0040001']  # Voting age population
-    
-    # Add race/ethnicity data from P2 and P3
-    # Non-Hispanic categories
-    blocks['NH_WHITE'] = p2['P0020002']  # Non-Hispanic White alone
-    blocks['NH_BLACK'] = p2['P0020003']  # Non-Hispanic Black alone
-    blocks['NH_AMIN'] = p2['P0020004']   # Non-Hispanic American Indian/Alaska Native alone
-    blocks['NH_ASIAN'] = p2['P0020005']  # Non-Hispanic Asian alone
-    blocks['NH_NHPI'] = p2['P0020006']   # Non-Hispanic Native Hawaiian/Pacific Islander alone
-    blocks['NH_OTHER'] = p2['P0020007']  # Non-Hispanic Some Other Race alone
-    blocks['NH_2MORE'] = p2['P0020008']  # Non-Hispanic Two or More Races
-    
-    # Hispanic categories
-    blocks['HISP'] = p3['P0030002']      # Hispanic or Latino
-    blocks['H_WHITE'] = p3['P0030003']   # Hispanic White alone
-    blocks['H_BLACK'] = p3['P0030004']   # Hispanic Black alone
-    blocks['H_AMIN'] = p3['P0030005']    # Hispanic American Indian/Alaska Native alone
-    blocks['H_ASIAN'] = p3['P0030006']   # Hispanic Asian alone
-    blocks['H_NHPI'] = p3['P0030007']    # Hispanic Native Hawaiian/Pacific Islander alone
-    blocks['H_OTHER'] = p3['P0030008']   # Hispanic Some Other Race alone
-    blocks['H_2MORE'] = p3['P0030009']   # Hispanic Two or More Races
-    
-    return blocks
+    blocks_path = "data/UT_blocks.geojson"
+    if os.path.exists(blocks_path):
+        blocks = gpd.read_file(blocks_path)
+        print(f"Loaded {len(blocks)} blocks")
+        return blocks
+    else:
+        print(f"Error: {blocks_path} not found. Run 01_compile_blocks.py first.")
+        sys.exit(1)
 
-def load_election_data():
-    """Load and process election data from disaggregated files."""
-    print("Loading election data...")
+def load_block_group_boundaries():
+    """Load block group boundaries from the raw data."""
+    print("Loading block group boundaries...")
     
-    # Define the offices we want to include
-    target_offices = ['PRE', 'GOV', 'ATG', 'AUD', 'TRE', 'USS']
-    
-    election_years = [2016, 2018, 2020, 2024]
-    election_data = {}
-    
-    for year in election_years:
-        print(f"  Processing {year} election data...")
-        disagg_path = f"data/disagg/ut_{year}_gen_2020_blocks/ut_{year}_gen_2020_blocks.shp"
+    block_group_path = "data/raw/ut_bg_2020_bound/ut_bg_2020_bound.shp"
+    if os.path.exists(block_group_path):
+        print(f"  Using block group data from: {block_group_path}")
+        block_groups = gpd.read_file(block_group_path)
         
-        if os.path.exists(disagg_path):
-            year_data = gpd.read_file(disagg_path)
-            
-            # Start with GEOID20
-            year_dict = {'GEOID20': year_data['GEOID20']}
-            
-            # Get all election columns and filter by office
-            election_cols = [col for col in year_data.columns if col.startswith('G')]
-            
-            # Extract all columns for target offices (keep individual candidate columns)
-            for office in target_offices:
-                office_cols = [col for col in election_cols if col[3:6] == office]
-                
-                if office_cols:
-                    # Keep all individual candidate columns for this office
-                    for col in office_cols:
-                        year_dict[col] = year_data[col].fillna(0)
-            
-            election_data[year] = year_dict
-            print(f"    Found {len([k for k in year_dict.keys() if k != 'GEOID20'])} election columns")
-        else:
-            print(f"    Warning: {disagg_path} not found")
+        # Ensure we have a unique block group ID
+        if 'GEOID20' not in block_groups.columns:
+            print("Error: GEOID20 column not found in block group data")
+            sys.exit(1)
+        
+        return block_groups
+    else:
+        print(f"Error: {block_group_path} not found")
+        sys.exit(1)
+
+def aggregate_blocks_to_block_groups(blocks, block_groups):
+    """Aggregate block data to block group level using maup."""
+    print("Aggregating block data to block groups...")
     
-    return election_data
+    # Ensure both datasets have the same CRS
+    if block_groups.crs != blocks.crs:
+        print(f"  Converting block groups CRS from {block_groups.crs} to {blocks.crs}")
+        block_groups = block_groups.to_crs(blocks.crs)
+    
+    # Use maup to aggregate block data to block groups
+    try:
+        # First, assign blocks to block groups
+        blocks_to_block_groups_assignment = maup.assign(blocks, block_groups)
+        
+        # Get numeric columns to aggregate (demographics, population, election data)
+        numeric_columns = blocks.select_dtypes(include=[np.number]).columns
+        numeric_columns = [col for col in numeric_columns if col != 'GEOID20']  # Exclude GEOID20
+        
+        # Aggregate data using pandas groupby
+        aggregated_data = blocks[numeric_columns].groupby(blocks_to_block_groups_assignment).sum()
+        
+        # Add block group geometry and ID
+        block_group_columns = ['GEOID20', 'geometry']
+        
+        block_group_data = block_groups[block_group_columns].copy()
+        block_group_data = block_group_data.merge(aggregated_data, left_index=True, right_index=True)
+        
+        print(f"  Aggregated {len(blocks)} blocks to {len(block_group_data)} block groups")
+        return block_group_data
+        
+    except Exception as e:
+        print(f"  Error aggregating data: {e}")
+        sys.exit(1)
 
 def load_coi_data():
-    """Load and process Communities of Interest data."""
+    """Load Communities of Interest data (same as block script)."""
     print("Loading Communities of Interest data...")
     
     coi_data = {}
@@ -264,9 +238,48 @@ def load_coi_data():
     
     return coi_data
 
+def assign_coi_to_block_groups(block_groups, coi_data):
+    """Assign Communities of Interest to block groups using spatial operations."""
+    print("Assigning Communities of Interest to block groups...")
+    
+    # Initialize COI columns with blank string (not assigned)
+    coi_columns = ['HIGHERED_ID', 'METRO_ID', 'SCHDIST_ID', 'BASIN_ID', 'WATER_ID', 'RESERVATION_ID', 'MILITARY_ID']
+    for col in coi_columns:
+        block_groups[col] = ''
+    
+    # Use maup to assign COI to block groups
+    for coi_name, coi_gdf in coi_data.items():
+        if coi_gdf is not None:
+            print(f"  Assigning {coi_name}...")
+            try:
+                # Ensure both datasets have the same CRS
+                if coi_gdf.crs != block_groups.crs:
+                    print(f"    Converting {coi_name} CRS from {coi_gdf.crs} to {block_groups.crs}")
+                    coi_gdf = coi_gdf.to_crs(block_groups.crs)
+                
+                # Use maup.assign to assign COI to block groups
+                assignment = maup.assign(block_groups, coi_gdf)
+                
+                # Create a mask for block groups that were assigned
+                assigned_mask = assignment.notna()
+                
+                # Set assigned block groups to the COI ID
+                if assigned_mask.any():
+                    coi_ids = coi_gdf.iloc[assignment[assigned_mask].astype(int)][coi_name].values
+                    block_groups.loc[assigned_mask, coi_name] = coi_ids
+                
+                print(f"    Assigned {assigned_mask.sum()} block groups to {coi_name}")
+                
+            except Exception as e:
+                print(f"    Error assigning {coi_name}: {e}")
+                # Set all to blank string (not assigned) if there's an error
+                block_groups[coi_name] = ''
+    
+    return block_groups
+
 def load_municipality_data():
-    """Load municipality and county assignment data."""
-    print("Loading municipality and county data...")
+    """Load municipality data (same as block script)."""
+    print("Loading municipality data...")
     
     # Municipalities
     muni_path = "data/geography/UtahMunicipalBoundaries/Municipalities.shp"
@@ -277,88 +290,49 @@ def load_municipality_data():
         print("    Warning: Municipalities file not found")
         return None
 
-def assign_coi_to_blocks(blocks, coi_data):
-    """Assign Communities of Interest to blocks using spatial operations."""
-    print("Assigning Communities of Interest to blocks...")
-    
-    # Initialize COI columns with blank string (not assigned)
-    coi_columns = ['HIGHERED_ID', 'METRO_ID', 'SCHDIST_ID', 'BASIN_ID', 'WATER_ID', 'RESERVATION_ID', 'MILITARY_ID']
-    for col in coi_columns:
-        blocks[col] = ''
-    
-    # Use maup to assign COI to blocks
-    for coi_name, coi_gdf in coi_data.items():
-        if coi_gdf is not None:
-            print(f"  Assigning {coi_name}...")
-            try:
-                # Ensure both datasets have the same CRS
-                if coi_gdf.crs != blocks.crs:
-                    print(f"    Converting {coi_name} CRS from {coi_gdf.crs} to {blocks.crs}")
-                    coi_gdf = coi_gdf.to_crs(blocks.crs)
-                
-                # Use maup.assign to assign COI to blocks
-                assignment = maup.assign(blocks, coi_gdf)
-                
-                # Create a mask for blocks that were assigned
-                assigned_mask = assignment.notna()
-                
-                # Set assigned blocks to the COI ID
-                if assigned_mask.any():
-                    coi_ids = coi_gdf.iloc[assignment[assigned_mask].astype(int)][coi_name].values
-                    blocks.loc[assigned_mask, coi_name] = coi_ids
-                
-                print(f"    Assigned {assigned_mask.sum()} blocks to {coi_name}")
-                
-            except Exception as e:
-                print(f"    Error assigning {coi_name}: {e}")
-                # Set all to blank string (not assigned) if there's an error
-                blocks[coi_name] = ''
-    
-    return blocks
-
-def assign_municipalities_to_blocks(blocks, municipalities):
-    """Assign municipalities to blocks."""
-    print("Assigning municipalities to blocks...")
+def assign_municipalities_to_block_groups(block_groups, municipalities):
+    """Assign municipalities to block groups."""
+    print("Assigning municipalities to block groups...")
     
     # Initialize municipality columns
-    blocks['MUNINAME'] = ''
-    blocks['MUNIID'] = ''
+    block_groups['MUNINAME'] = ''
+    block_groups['MUNIID'] = ''
     
     if municipalities is not None:
         try:
             # Ensure both datasets have the same CRS
-            if municipalities.crs != blocks.crs:
-                print(f"    Converting municipalities CRS from {municipalities.crs} to {blocks.crs}")
-                municipalities = municipalities.to_crs(blocks.crs)
+            if municipalities.crs != block_groups.crs:
+                print(f"    Converting municipalities CRS from {municipalities.crs} to {block_groups.crs}")
+                municipalities = municipalities.to_crs(block_groups.crs)
             
-            # Use maup to assign municipalities to blocks
-            assignment = maup.assign(blocks, municipalities)
+            # Use maup to assign municipalities to block groups
+            assignment = maup.assign(block_groups, municipalities)
             
-            # Get municipality names and IDs for assigned blocks
+            # Get municipality names and IDs for assigned block groups
             assigned_mask = assignment.notna()
             if assigned_mask.any():
-                # Get the municipality data for assigned blocks
+                # Get the municipality data for assigned block groups
                 muni_data = municipalities.iloc[assignment[assigned_mask].astype(int)]
                 
                 # Assign municipality names and IDs
-                blocks.loc[assigned_mask, 'MUNINAME'] = muni_data['NAME'].values
-                blocks.loc[assigned_mask, 'MUNIID'] = muni_data.index.values
+                block_groups.loc[assigned_mask, 'MUNINAME'] = muni_data['NAME'].values
+                block_groups.loc[assigned_mask, 'MUNIID'] = muni_data.index.values
                 
-                print(f"    Assigned {assigned_mask.sum()} blocks to municipalities")
+                print(f"    Assigned {assigned_mask.sum()} block groups to municipalities")
             else:
-                print("    No blocks assigned to municipalities")
+                print("    No block groups assigned to municipalities")
                 
         except Exception as e:
             print(f"    Error assigning municipalities: {e}")
     
-    return blocks
+    return block_groups
 
-def add_county_info(blocks):
-    """Add county information from GEOID20."""
+def add_county_info(block_groups):
+    """Add county information by extracting from GEOID20."""
     print("Adding county information...")
     
-    # Extract county FIPS from GEOID20 (characters 3-5)
-    blocks['COUNTYID'] = blocks['GEOID20'].str[2:5]
+    # Extract county FIPS from GEOID20 (characters 2-5)
+    block_groups['COUNTYID'] = block_groups['GEOID20'].str[2:5]
     
     # Utah county names mapping (FIPS to name)
     utah_counties = {
@@ -372,38 +346,25 @@ def add_county_info(blocks):
         '057': 'Weber'
     }
     
-    blocks['COUNTYNAME'] = blocks['COUNTYID'].map(utah_counties)
+    block_groups['COUNTYNAME'] = block_groups['COUNTYID'].map(utah_counties)
     
-    return blocks
-
-def combine_election_data(blocks, election_data):
-    """Combine election data from all years into the blocks dataframe."""
-    print("Combining election data...")
-    
-    for year, year_data in election_data.items():
-        print(f"  Adding {year} election data...")
-        
-        # Create a dataframe from the year's data
-        year_df = pd.DataFrame(year_data)
-        
-        # Merge with blocks on GEOID20
-        blocks = blocks.merge(year_df, on='GEOID20', how='left', suffixes=('', f'_{year}'))
-    
-    return blocks
+    return block_groups
 
 def main():
-    """Main function to compile all Utah block data."""
-    print("Starting Utah block dataset compilation...")
+    """Main function to compile block group data from blocks."""
+    print("Starting Utah block group dataset compilation...")
     
     # Create output directory if it doesn't exist
     os.makedirs('data', exist_ok=True)
     
-    # Load census demographic data
-    blocks = load_census_demographics()
-    print(f"Loaded {len(blocks)} census blocks")
+    # Load block data
+    blocks = load_block_data()
     
-    # Load election data
-    election_data = load_election_data()
+    # Load block group boundaries
+    block_groups = load_block_group_boundaries()
+    
+    # Aggregate block data to block groups
+    block_group_data = aggregate_blocks_to_block_groups(blocks, block_groups)
     
     # Load COI data
     coi_data = load_coi_data()
@@ -411,17 +372,14 @@ def main():
     # Load municipality data
     municipalities = load_municipality_data()
     
-    # Assign COI to blocks
-    blocks = assign_coi_to_blocks(blocks, coi_data)
+    # Assign COI to block groups
+    block_group_data = assign_coi_to_block_groups(block_group_data, coi_data)
     
-    # Assign municipalities to blocks
-    blocks = assign_municipalities_to_blocks(blocks, municipalities)
+    # Assign municipalities to block groups
+    block_group_data = assign_municipalities_to_block_groups(block_group_data, municipalities)
     
     # Add county information
-    blocks = add_county_info(blocks)
-    
-    # Combine election data
-    blocks = combine_election_data(blocks, election_data)
+    block_group_data = add_county_info(block_group_data)
     
     # Ensure all required columns exist with appropriate defaults
     required_columns = {
@@ -439,45 +397,70 @@ def main():
     }
     
     for col, default_val in required_columns.items():
-        if col not in blocks.columns:
-            blocks[col] = default_val
+        if col not in block_group_data.columns:
+            block_group_data[col] = default_val
     
     # Fill NaN values with appropriate defaults
-    blocks = blocks.fillna({
+    block_group_data = block_group_data.fillna({
         'MUNINAME': '', 'MUNIID': '', 'COUNTYNAME': '', 'COUNTYID': '',
         'TOTPOP': 0, 'VAP': 0
     })
     
     # Fill NaN values for numeric columns with 0
-    numeric_columns = blocks.select_dtypes(include=[np.number]).columns
-    blocks[numeric_columns] = blocks[numeric_columns].fillna(0)
+    numeric_columns = block_group_data.select_dtypes(include=[np.number]).columns
+    block_group_data[numeric_columns] = block_group_data[numeric_columns].fillna(0)
+    
+    # Fix topological issues using maup best practices
+    print("Fixing topological issues...")
+    try:
+        # Use maup's smart_repair which handles both overlaps and gaps
+        print("  Using maup.smart_repair for comprehensive topology repair...")
+        repaired_block_groups = maup.smart_repair(block_group_data, fill_gaps_threshold=0.3)
+        
+        # Verify the repair worked
+        overlaps = maup.adjacencies(repaired_block_groups)
+        if len(overlaps) == 0:
+            print("    Topology is clean - no overlaps remaining")
+            block_group_data = repaired_block_groups
+        else:
+            print(f"  ⚠️ {len(overlaps)} overlaps still remain after repair")
+            print("  Using repaired data anyway - GerryChain can handle minor overlaps")
+            block_group_data = repaired_block_groups
+        
+    except Exception as e:
+        print(f"  Warning: Could not repair topology: {e}")
+        print("  Proceeding with original data...")
     
     # Save to GeoJSON
-    output_path = 'data/UT_blocks.geojson'
+    output_path = 'data/UT_block_groups.geojson'
     print(f"Saving compiled data to {output_path}...")
     
     # Convert to a projected CRS appropriate for Utah (UTM Zone 12N)
-    # This will prevent GerryChain warnings about geographic CRS
-    if blocks.crs is None:
-        blocks = blocks.set_crs('EPSG:4269')  # NAD83 (original CRS)
+    if block_group_data.crs is None:
+        block_group_data = block_group_data.set_crs('EPSG:4269')  # NAD83 (original CRS)
     
     # Convert to UTM Zone 12N (EPSG:32612) which is appropriate for Utah
-    blocks = blocks.to_crs('EPSG:32612')
+    block_group_data = block_group_data.to_crs('EPSG:32612')
     
-    blocks.to_file(output_path, driver='GeoJSON')
+    block_group_data.to_file(output_path, driver='GeoJSON')
     
-    print(f"Compilation complete! Saved {len(blocks)} blocks to {output_path}")
-    print(f"Columns: {list(blocks.columns)}")
+    print(f"Compilation complete! Saved {len(block_group_data)} block groups to {output_path}")
+    if hasattr(block_group_data, 'columns'):
+        print(f"Columns: {list(block_group_data.columns)}")
+    else:
+        print("Columns: [GeoSeries - no column info available]")
     
     # Print summary statistics
     print("\nSummary Statistics:")
-    print(f"Total blocks: {len(blocks)}")
-    print(f"Total population: {blocks['TOTPOP'].sum():,}")
-    print(f"Total VAP: {blocks['VAP'].sum():,}")
-    print(f"Blocks with municipalities: {(blocks['MUNINAME'] != '').sum()}")
-    print(f"Blocks in higher education areas: {(blocks['HIGHERED_ID'] != '').sum()}")
-    print(f"Blocks in metro areas: {(blocks['METRO_ID'] != '').sum()}")
-    print(f"Blocks in school districts: {(blocks['SCHDIST_ID'] != '').sum()}")
+    print(f"Total block groups: {len(block_group_data)}")
+    print(f"Total population: {block_group_data['TOTPOP'].sum():,}")
+    print(f"Total VAP: {block_group_data['VAP'].sum():,}")
+    print(f"Block groups with municipalities: {(block_group_data['MUNINAME'] != '').sum()}")
+    print(f"Block groups in higher education areas: {(block_group_data['HIGHERED_ID'] != '').sum()}")
+    print(f"Block groups in metro areas: {(block_group_data['METRO_ID'] != '').sum()}")
+    print(f"Block groups in school districts: {(block_group_data['SCHDIST_ID'] != '').sum()}")
+    print(f"Block groups in reservations: {(block_group_data['RESERVATION_ID'] != '').sum()}")
+    print(f"Block groups in military areas: {(block_group_data['MILITARY_ID'] != '').sum()}")
 
 if __name__ == "__main__":
     main()

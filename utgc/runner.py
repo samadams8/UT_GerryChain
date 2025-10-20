@@ -198,7 +198,7 @@ class EnsembleRunner:
 
         # Remind the user that run parameters cannot be initialized from a config file
         if 'run' in config:
-            print(f"!!!Config included run parameters: {config['run']}. Note that run parameters are passed as arguments to precondition() and run().")
+            print(f"!!! Config included run parameters: {json.dumps(config['run'], indent=2)}\nNote that run parameters must be passed as arguments to precondition() and run().")
 
         return runner
 
@@ -212,6 +212,49 @@ class EnsembleRunner:
         return GeographicPartition(
             self.graph, assignment="initial_plan", updaters=self._updaters
         )
+
+    def available_election_columns(self, years: List[int], offices: List[str]) -> List[str]:
+        available_columns = set(self.geodata.columns)
+        available_elections = []
+
+        for column in available_columns:
+            if column.startswith("G"):
+                year = int(column[1:3]) + 2000
+                office = column[3:6]
+                if year in years and office in offices:
+                    available_elections.append(column)
+
+        return sorted(available_elections)
+    
+    def election_names_parties(self, years: List[int], offices: List[str]) -> List[Dict[str, str]]:
+        available_elections = self.available_election_columns(years, offices)
+        election_names_parties = []
+
+        for year in years:
+            for office in offices:
+                name = f"{year:04d}{office}"
+                parties_to_columns = {}
+
+                # Get a list of all the columns for this year and office
+                columns = [c for c in available_elections if c.startswith(f"G{year%100:02d}{office}")]
+                parties = [c[6] for c in columns]
+                # Whether each entry is the only one for that party
+                is_unique = [parties.count(p) == 1 for p in parties]
+
+                # Create entries in the parties to columns dictionary for each party
+                for idx, column in enumerate(columns):
+                    if is_unique[idx]:
+                        parties_to_columns[parties[idx]] = column
+                    else:
+                        key = column[6:]
+                        parties_to_columns[key] = column
+
+                election_names_parties.append({
+                    "name": name,
+                    "parties_to_columns": parties_to_columns
+                })
+
+        return election_names_parties
     
     def _proposal(self,
         initial_partition: Optional[Partition] = None
@@ -478,7 +521,19 @@ class EnsembleRunner:
         )
         print(f"  Added election updater: '{name}'")
 
+        # Create a warning if the columns are not found in the geodata
+        for column in parties_to_columns.values():
+            if column not in self.geodata.columns:
+                print(f"  WARNING: Column '{column}' not found in geodata. Please check the column names and try again.")
+
         return self
+
+    def add_partisan_index_updater(self,
+        name: str,
+        elections: List[str],
+        agg_func: Literal["mean", "median"] = "mean",
+    ) -> 'EnsembleRunner':
+        raise NotImplementedError("Partisan index updater not implemented.")
 
     def add_updater_function(self,
         name: str,
