@@ -210,7 +210,7 @@ class ResultSet:
 
     def plot_metric_violin(self, metric_name: str, user_maps: Optional[List[str]] = None, 
                           save_path: Optional[str] = None, show: bool = False, 
-                          sort_districts: bool = False, fig_name: Optional[str] = None):
+                          sort_districts: bool = True, fig_name: Optional[str] = None):
         """
         Plot violin plot of a district-level metric.
         

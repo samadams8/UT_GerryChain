@@ -24,7 +24,7 @@ from gerrychain.updaters.locality_split_scores import LocalitySplits
 import numpy as np
 
 from .results import ResultSet
-from .metrics import calculate_partisan_metrics, compute_split_name_lists
+import utgc.metrics as utmetrics
 
 # --- HELPER CLASSES AND FUNCTIONS ---
 def random_spanning_tree_with_edge_penalties(
@@ -505,13 +505,15 @@ class EnsembleRunner:
         self,
         name: str,
         parties_to_columns: Dict[str, str],
+        ignore_output: bool = True,
     ) -> 'EnsembleRunner':
         # Record the construction history
         self._construction_history.append({
             "method": "add_election_updater",
             "kwargs": {
                 "name": name,
-                "parties_to_columns": parties_to_columns
+                "parties_to_columns": parties_to_columns,
+                "ignore_output": ignore_output
             },
         })
 
@@ -520,6 +522,8 @@ class EnsembleRunner:
             parties_to_columns=parties_to_columns,
         )
         print(f"  Added election updater: '{name}'")
+        if ignore_output:
+            self.ignore_output(name)
 
         # Create a warning if the columns are not found in the geodata
         for column in parties_to_columns.values():
@@ -527,13 +531,95 @@ class EnsembleRunner:
                 print(f"  WARNING: Column '{column}' not found in geodata. Please check the column names and try again.")
 
         return self
-
-    def add_partisan_index_updater(self,
+    
+    def add_election_aggregator(self,
         name: str,
         elections: List[str],
-        agg_func: Literal["mean", "median"] = "mean",
+        parties: List[str] = ["D", "R", "-"],
+        ignore_table_output: bool = True,
+        ignore_agg_output: bool = True,
     ) -> 'EnsembleRunner':
-        raise NotImplementedError("Partisan index updater not implemented.")
+        # Record the construction history
+        self._construction_history.append({
+            "method": "add_election_aggregator",
+            "kwargs": {
+                "name": name,
+                "elections": elections,
+                "parties": parties,
+                "ignore_table_output": ignore_table_output,
+                "ignore_agg_output": ignore_agg_output
+            },
+        })
+
+        # Create the table 
+        self._updaters[f"{name}_table"] = lambda p: utmetrics.tabulate_partisan_data(p, elections, parties)
+        print(f"  Added partisan data tabulator: '{f"{name}_table"}'")
+
+        if ignore_table_output:
+            self.ignore_output(f"{name}_table")
+
+        # Create the aggregator
+        self._updaters[name] = lambda p: utmetrics.aggregate_partisan_metrics(p[f"{name}_table"])
+        print(f"  Added partisan data aggregator: '{name}'")
+
+        if ignore_agg_output:
+            self.ignore_output(name)
+
+        return self
+    
+    def add_election_metric_updaters(self,
+        aggregator_name: str,
+        metrics: List[str],
+        prepend_agg_name: bool = False,
+    ) -> 'EnsembleRunner':
+        # Record the construction history
+        self._construction_history.append({
+            "method": "add_election_metric_updaters",
+            "kwargs": {
+                "aggregator_name": aggregator_name,
+                "metrics": metrics,
+                "prepend_agg_name": prepend_agg_name
+            },
+        })
+
+        # Election metrics require an election data aggregator to be added first
+        if aggregator_name not in self._updaters:
+            warn(f"Election metric updater requires election data aggregator '{aggregator_name}' to be added, but it was not found.")
+
+        for metric in metrics:
+            if metric == "partisan_bias_utah":
+                if prepend_agg_name: mname = f"{aggregator_name}_{metric}"
+                else: mname = metric
+                self._updaters[mname] = lambda p: utmetrics.partisan_bias_utah(p[aggregator_name])
+            elif metric == "partisan_bias":
+                if prepend_agg_name: mname = f"{aggregator_name}_{metric}"
+                else: mname = metric
+                self._updaters[mname] = lambda p: utmetrics.partisan_bias(p[aggregator_name])
+            elif metric == "mean_median":
+                if prepend_agg_name: mname = f"{aggregator_name}_{metric}"
+                else: mname = metric
+                self._updaters[mname] = lambda p: utmetrics.mean_median(p[aggregator_name])
+            elif metric == "efficiency_gap":
+                if prepend_agg_name: mname = f"{aggregator_name}_{metric}"
+                else: mname = metric
+                self._updaters[mname] = lambda p: utmetrics.efficiency_gap(p[aggregator_name])
+            elif metric == "stdev_partisan_share":
+                if prepend_agg_name: mname = f"{aggregator_name}_{metric}"
+                else: mname = metric
+                self._updaters[mname] = lambda p: utmetrics.stdev_partisan_share(p[aggregator_name])
+            elif metric == "majority_partisan_shares":
+                if prepend_agg_name: mname = f"{aggregator_name}_{metric}"
+                else: mname = metric
+                self._updaters[mname] = lambda p: utmetrics.majority_partisan_shares(p[aggregator_name])
+            elif metric == "majority_seats":
+                if prepend_agg_name: mname = f"{aggregator_name}_{metric}"
+                else: mname = metric
+                self._updaters[mname] = lambda p: utmetrics.majority_seats(p[aggregator_name])
+            else:
+                raise ValueError(f"Unknown election metric: '{metric}'")
+            print(f"  Added election metric updater: '{mname}'")
+
+        return self
 
     def add_updater_function(self,
         name: str,
@@ -571,7 +657,7 @@ class EnsembleRunner:
         Indicate that the results for the named updater should not be included in the output file.
         """
         self._ignored_updaters.add(name)
-        print(f"  Ignoring updater in output: '{name}'")
+        print(f"    Ignoring updater in output: '{name}'")
         return self
 
     # Tilted run
@@ -896,7 +982,8 @@ class EnsembleRunner:
                         k: v for k, v in sorted(value.items())
                     }
                 else:
-                    data[updater_name] = value
+                    # Make the value a string
+                    data[updater_name] = str(value)
             output_file_handle.write(json.dumps(data) + "\n")
             output_file_handle.flush()
 

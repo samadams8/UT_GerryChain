@@ -145,7 +145,10 @@ def load_election_data():
                     # Keep all individual candidate columns for this office
                     for col in office_cols:
                         year_dict[col] = year_data[col].fillna(0)
-            
+                    
+                    # Add the total vote count for this election
+                    year_dict[f"G{year%100:02d}{office}-TOT"] = year_data[office_cols].sum(axis=1)
+
             election_data[year] = year_dict
             print(f"    Found {len([k for k in year_dict.keys() if k != 'GEOID20'])} election columns")
         else:
