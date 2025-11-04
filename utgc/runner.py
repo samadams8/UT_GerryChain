@@ -13,6 +13,7 @@ from pandas.core.indexes.accessors import NoNewAttributesMixin
 import yaml
 from math import ceil, sqrt
 import json
+from datetime import datetime
 
 from gerrychain import Graph, GeographicPartition, MarkovChain, Partition, updaters, constraints, accept, optimization
 from gerrychain.proposals import recom
@@ -502,6 +503,46 @@ class EnsembleRunner:
 
         return self
 
+    def make_total_column(
+        self,
+        total_col: str,
+        all_election_columns: List[str],
+    ) -> 'EnsembleRunner':
+        """
+        Create a total votes column by summing all election columns and sync it to graph nodes.
+        
+        Parameters
+        ----------
+        total_col : str
+            Name of the total column to create
+        all_election_columns : List[str]
+            List of all column names for this election to sum together
+        
+        Returns
+        -------
+        self
+        """
+        if total_col not in self.geodata.columns:
+            # Compute total from ALL columns for this election
+            party_cols = [col for col in all_election_columns if col in self.geodata.columns]
+            
+            if party_cols:
+                self.geodata[total_col] = 0
+                for col in party_cols:
+                    try:
+                        self.geodata[total_col] = self.geodata[total_col].fillna(0) + self.geodata[col].fillna(0)
+                    except Exception:
+                        # If non-numeric, coerce then sum
+                        self.geodata[total_col] = self.geodata[total_col].fillna(0) + pd.to_numeric(self.geodata[col], errors='coerce').fillna(0)
+            
+            # Sync the new column to graph nodes
+            if total_col in self.geodata.columns:
+                for node in self.graph.nodes:
+                    if node in self.geodata.index:
+                        self.graph.nodes[node][total_col] = self.geodata.loc[node, total_col]
+        
+        return self
+
     def add_election_updater(
         self,
         name: str,
@@ -530,6 +571,170 @@ class EnsembleRunner:
         for column in parties_to_columns.values():
             if column not in self.geodata.columns:
                 print(f"  WARNING: Column '{column}' not found in geodata. Please check the column names and try again.")
+
+        return self
+
+    def add_election_updaters(
+        self,
+        years: Optional[List[int]] = None,
+        elections: Optional[List[str]] = None,
+        parties: Optional[List[str]] = ['R', 'D', '-'],
+        parties_to_columns_override: Optional[Dict[str, Dict[str, str]]] = {},
+        ignore_output: bool = True,
+    ) -> 'EnsembleRunner':
+        """
+        Auto-detect and add election updaters for all elections that match the
+        provided year and office filters. If no filters are provided, all
+        detectable elections are included.
+
+        Parameters
+        ----------
+        years : Optional[List[int]]
+            Four-digit years to include (e.g., [2016, 2020]). If None, all
+            years present in the geodata will be included.
+        elections : Optional[List[str]]
+            Three-letter office codes to include (e.g., ['GOV','PRE']). If None,
+            all offices present in the geodata will be included.
+        parties : Optional[List[str]]
+            Party initials to track. Parties are matched if their key starts
+            with any of the provided initials, or if the key is exactly '-'.
+            If None, defaults to ['R', 'D', '-']. Pass an empty list to track
+            all parties (not recommended).
+        parties_to_columns_override : Optional[Dict[str, Dict[str, str]]]
+            Optional mapping that overrides the auto-detected party-to-column
+            mapping for specific elections. Keys must be election names in the
+            form '{YYYY}{OFFICE}' (e.g., '2024GOV'), and values are mappings
+            of party keys to column names (e.g., {'R1': 'G24GOVRHEN'}).
+        ignore_output : bool
+            Whether to ignore these updaters in the serialized output.
+
+        Returns
+        -------
+        self : EnsembleRunner
+            Enables chaining.
+        """
+        # Record the construction history
+        self._construction_history.append({
+            "method": "add_election_updaters",
+            "kwargs": {
+                "years": years,
+                "elections": elections,
+                "parties": parties,
+                "parties_to_columns_override": parties_to_columns_override,
+                "ignore_output": ignore_output,
+            },
+        })
+
+        # Collect all election-like columns from geodata
+        # Filter: must start with 'G' followed immediately by two digits
+        columns = []
+        for c in self.geodata.columns:
+            if isinstance(c, str) and len(c) >= 3 and c.startswith("G") and c[1:3].isdigit():
+                columns.append(c)
+
+        # Helper function to convert two-digit year to most recent past year
+        current_year = datetime.now().year
+        def two_digit_to_year(yy_str: str) -> int:
+            """Convert two-digit year to most recent past year."""
+            yy = int(yy_str)
+            # Try current century first
+            candidate = 2000 + yy
+            if candidate <= current_year:
+                return candidate
+            # Try previous century
+            return 1900 + yy
+
+        # Discover available years and offices if not supplied
+        discovered_years = sorted({two_digit_to_year(c[1:3]) for c in columns if len(c) >= 3 and c[1:3].isdigit()})
+        discovered_offices = sorted({c[3:6] for c in columns if len(c) >= 6})
+
+        years = years or discovered_years
+        elections = elections or discovered_offices
+
+        # Group columns by election name {YYYY}{OFFICE}
+        # Example: 'G24GOVRHEN' -> year=2024 (most recent past), office='GOV'
+        election_to_cols: Dict[str, List[str]] = {}
+        for col in columns:
+            try:
+                yy_str = col[1:3]
+                if len(col) < 6:
+                    continue
+                office = col[3:6]
+                if not (yy_str.isdigit() and len(office) == 3):
+                    continue
+                year = two_digit_to_year(yy_str)
+            except Exception:
+                continue
+
+            if (year in years) and (office in elections):
+                ename = f"{year:04d}{office}"
+                election_to_cols.setdefault(ename, []).append(col)
+
+        # Build party-to-column mapping per election, compute totals, apply overrides, and register updaters
+        for ename, cols in sorted(election_to_cols.items()):
+            # Determine year and office for naming auxiliary columns
+            year = int(ename[:4])
+            office = ename[4:7]
+            yy = f"{year % 100:02d}"
+
+            # Build party keys: if multiple columns share the same first party letter,
+            # assign sequential keys (e.g., R1, R2). If unique, use single-letter key (e.g., R).
+            party_initial_to_cols: Dict[str, List[str]] = {}
+            for c in cols:
+                if len(c) < 7:
+                    continue
+                party_initial = c[6]
+                party_initial_to_cols.setdefault(party_initial, []).append(c)
+
+            parties_to_columns: Dict[str, str] = {}
+            for initial, plist in party_initial_to_cols.items():
+                if len(plist) == 1:
+                    parties_to_columns[initial] = plist[0]
+                else:
+                    # Stable order for deterministic keys
+                    for i, pc in enumerate(sorted(plist)):
+                        parties_to_columns[f"{initial}{i+1}"] = pc
+
+            # Create total votes column name (will be computed in add_election_updater)
+            total_col = f"G{yy}{office}-TOT"
+            # Attach total votes under '-' key
+            parties_to_columns["-"] = total_col
+
+            # Apply per-election overrides if provided
+            if ename in parties_to_columns_override:
+                for k, v in parties_to_columns_override[ename].items():
+                    parties_to_columns[k] = v
+
+            # Filter parties if specified
+            if parties is not None:
+                # Filter to only include parties that:
+                # 1. Start with any of the provided party initials, OR
+                # 2. Are exactly '-' (for total votes)
+                filtered_parties_to_columns: Dict[str, str] = {}
+                for party_key, col_name in parties_to_columns.items():
+                    if party_key == "-":
+                        # Always include total votes if '-' is in the parties list
+                        if "-" in parties:
+                            filtered_parties_to_columns[party_key] = col_name
+                    else:
+                        # Check if party key starts with any of the provided initials
+                        for party_init in parties:
+                            if party_key.startswith(party_init):
+                                filtered_parties_to_columns[party_key] = col_name
+                                break
+                parties_to_columns = filtered_parties_to_columns
+
+            # Create total column if needed (before registering the updater)
+            if "-" in parties_to_columns:
+                total_col = parties_to_columns["-"]
+                self.make_total_column(total_col, cols)
+
+            # Register the election updater
+            self.add_election_updater(
+                name=ename,
+                parties_to_columns=parties_to_columns,
+                ignore_output=ignore_output,
+            )
 
         return self
     
