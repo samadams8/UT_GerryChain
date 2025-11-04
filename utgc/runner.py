@@ -426,7 +426,8 @@ class EnsembleRunner:
         penalty: float,
     ) -> 'EnsembleRunner':
         if not os.path.exists(csv_path):
-            raise FileNotFoundError(f"Edge file not found: {csv_path}")
+            warn(f"Transitability edge file not found: {csv_path}. Skipping edge penalties.")
+            return self
         if penalty <= 0:
             return self
         

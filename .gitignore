@@ -1,13 +1,7 @@
 **/.DS_Store
 results/*
-data/cois/*
-data/disagg/*
-data/geography/*
-data/raw/*
-data/geography_processed/*
-data/UT_blocks.geojson
-data/UT_precincts.geojson
-data/UT_block_groups.geojson
+data/legacy/*
+*.geojson
 output/
 todos.md
 *.png

@@ -12,7 +12,8 @@ import warnings
 import pandas as pd
 warnings.filterwarnings('ignore')
 
-from utgc.ensemble import EnsembleRunner
+# Note: This file uses the legacy ensemble API. For new code, use utgc.runner.EnsembleRunner
+from utgc.legacy.ensemble import EnsembleRunner
 
 
 def main():
@@ -24,7 +25,7 @@ def main():
     # Build defaults dict to apply precedence: CLI > YAML > defaults
     defaults = {
         "initialization": {
-            "nodes_data": "data/UT_precincts.geojson",
+            "nodes_data": "data/UT_vtds.geojson",
             "initial_partition": "plans/CONG/2025_UT-C/2025_UT-C.shp",
             "random_seed": 1847,
         },

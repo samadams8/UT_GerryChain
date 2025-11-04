@@ -433,7 +433,7 @@ def draw_time_series(ax, df: pd.DataFrame, metric_names: Union[str, List[str]],
     else:
         ax.set_ylabel('Value')
         ax.set_title('Multiple Metrics Over Time')
-    
+        
     ax.grid(True, alpha=0.3)
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
 

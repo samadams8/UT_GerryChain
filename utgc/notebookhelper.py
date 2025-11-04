@@ -13,6 +13,50 @@ def get_district_count(shapefile_path):
     shapefile = gpd.read_file(shapefile_path)
     return len(shapefile)
 
+def generate_boundaries_from_geodata(geodata, muni_column="MUNIID", county_column="COUNTYID"):
+    """
+    Generate municipality and county boundary GeoDataFrames by dissolving the geodata.
+    
+    Parameters
+    ----------
+    geodata : gpd.GeoDataFrame
+        The input geodata with geometry and ID columns
+    muni_column : str, optional
+        Column name for municipality IDs, by default "MUNIID"
+    county_column : str, optional
+        Column name for county IDs, by default "COUNTYID"
+    
+    Returns
+    -------
+    tuple
+        (municipalities_gdf, counties_gdf) GeoDataFrames
+    """
+    municipalities = None
+    counties = None
+    
+    if muni_column in geodata.columns:
+        # Filter out empty MUNIIDs and dissolve
+        muni_data = geodata[geodata[muni_column] != ""].copy()
+        if len(muni_data) > 0:
+            # Dissolve by municipality, keeping first value for name columns
+            municipalities = muni_data.dissolve(by=muni_column, aggfunc='first')
+            # Keep only geometry and relevant columns
+            keep_cols = [c for c in municipalities.columns if c in ['MUNINAME', 'geometry'] or c == muni_column]
+            municipalities = municipalities[[c for c in keep_cols if c in municipalities.columns]].reset_index()
+            # Ensure CRS is preserved
+            municipalities = municipalities.set_crs(geodata.crs, allow_override=True)
+    
+    if county_column in geodata.columns:
+        # Dissolve by county, keeping first value for name columns
+        counties = geodata.dissolve(by=county_column, aggfunc='first')
+        # Keep only geometry and relevant columns
+        keep_cols = [c for c in counties.columns if c in ['COUNTYNAME', 'geometry'] or c == county_column]
+        counties = counties[[c for c in keep_cols if c in counties.columns]].reset_index()
+        # Ensure CRS is preserved
+        counties = counties.set_crs(geodata.crs, allow_override=True)
+    
+    return municipalities, counties
+
 def load_config(config_path=""):
     """
     Load a configuration file. If none is provided, we'll retrieve the latest in results/configurations/
