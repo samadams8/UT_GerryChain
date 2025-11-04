@@ -564,6 +564,7 @@ class EnsembleRunner:
             parties_to_columns=parties_to_columns,
         )
         print(f"  Added election updater: '{name}'")
+        print(f"    Parties to columns: {parties_to_columns}")
         if ignore_output:
             self.ignore_output(name)
 
@@ -702,6 +703,19 @@ class EnsembleRunner:
 
             # Apply per-election overrides if provided
             if ename in parties_to_columns_override:
+                # First, identify columns that are being overridden
+                override_columns = set(parties_to_columns_override[ename].values())
+                
+                # Remove any existing keys that point to columns being overridden
+                # (to avoid double-counting when override adds new keys for same columns)
+                keys_to_remove = [
+                    key for key, col in parties_to_columns.items()
+                    if col in override_columns and key != "-"
+                ]
+                for key in keys_to_remove:
+                    del parties_to_columns[key]
+                
+                # Now apply the overrides
                 for k, v in parties_to_columns_override[ename].items():
                     parties_to_columns[k] = v
 
@@ -1197,5 +1211,8 @@ class EnsembleRunner:
             for _, value in self._callbacks.items():
                 if step_number % value['frequency'] == 0:
                     value['action'](partition, step_number, save_dir)
-                    
+            
+            # Clear parent partition to save memory
+            partition.parent = None
+        
         output_file_handle.close()

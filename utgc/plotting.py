@@ -168,7 +168,55 @@ def visualize_partition(
     counties: Optional[gpd.GeoDataFrame] = None,
     split_munis_count: Optional[int] = None,
     split_counties_count: Optional[int] = None,
+    bounds_dir: str = "data/bounds",
+    auto_load_boundaries: bool = True,
+    county_path: Optional[str] = None,
+    muni_path: Optional[str] = None,
 ):
+    """
+    Visualize a partition with optional municipality and county boundaries.
+    
+    Parameters
+    ----------
+    partition : GeographicPartition
+        The partition to visualize
+    step : int
+        Step number for the title
+    output_dir : str
+        Directory to save the output image
+    municipalities : Optional[gpd.GeoDataFrame], optional
+        Municipality boundaries. If None and auto_load_boundaries=True, will load from bounds_dir or muni_path.
+    counties : Optional[gpd.GeoDataFrame], optional
+        County boundaries. If None and auto_load_boundaries=True, will load from bounds_dir or county_path.
+    split_munis_count : Optional[int], optional
+        Number of municipality splits to display in title
+    split_counties_count : Optional[int], optional
+        Number of county splits to display in title
+    bounds_dir : str, optional
+        Directory containing boundary shapefiles, by default "data/bounds".
+        Only used if county_path/muni_path are not provided.
+    auto_load_boundaries : bool, optional
+        If True and boundaries are None, automatically load from bounds_dir or paths, by default True
+    county_path : str, optional
+        Absolute path to county shapefile. If provided, takes precedence over bounds_dir.
+    muni_path : str, optional
+        Absolute path to municipality shapefile. If provided, takes precedence over bounds_dir.
+    """
+    # Auto-load boundaries if not provided
+    if auto_load_boundaries:
+        if counties is None or municipalities is None:
+            # Import here to avoid circular imports
+            from .notebookhelper import load_boundaries_from_shapefiles
+            loaded_munis, loaded_counties = load_boundaries_from_shapefiles(
+                bounds_dir=bounds_dir,
+                county_path=county_path,
+                muni_path=muni_path
+            )
+            if municipalities is None:
+                municipalities = loaded_munis
+            if counties is None:
+                counties = loaded_counties
+    
     # Prepare figure with two panels: full map (left) and Wasatch Front zoom (right)
     fig, (ax_full, ax_zoom) = plt.subplots(1, 2, figsize=(12, 8))
 

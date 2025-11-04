@@ -1,6 +1,6 @@
 **/.DS_Store
 results/*
-data/legacy/*
+data/*
 *.geojson
 output/
 todos.md

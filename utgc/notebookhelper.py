@@ -5,6 +5,7 @@ import pandas as pd
 from IPython.display import display
 import ipywidgets as widgets
 from PIL import Image
+from typing import Optional
 
 def get_district_count(shapefile_path):
     """
@@ -13,9 +14,83 @@ def get_district_count(shapefile_path):
     shapefile = gpd.read_file(shapefile_path)
     return len(shapefile)
 
+def load_boundaries_from_shapefiles(
+    bounds_dir: str = "data/bounds",
+    target_crs: str = "EPSG:26912",
+    county_shapefile: Optional[str] = None,
+    muni_shapefile: Optional[str] = None,
+    county_path: Optional[str] = None,
+    muni_path: Optional[str] = None,
+):
+    """
+    Load municipality and county boundary GeoDataFrames from shapefiles.
+    
+    Parameters
+    ----------
+    bounds_dir : str, optional
+        Base directory containing boundary shapefiles, by default "data/bounds".
+        Only used if county_path/muni_path are not provided.
+    target_crs : str, optional
+        Target CRS to project to, by default "EPSG:26912"
+    county_shapefile : str, optional
+        Relative path to county shapefile from bounds_dir, by default 
+        "UtahCountyBoundaries/ut_cnty_2020_bound.shp". Ignored if county_path is provided.
+    muni_shapefile : str, optional
+        Relative path to municipality shapefile from bounds_dir, by default 
+        "UtahMunicipalBoundaries/Municipalities.shp". Ignored if muni_path is provided.
+    county_path : str, optional
+        Absolute path to county shapefile. If provided, takes precedence over 
+        bounds_dir + county_shapefile.
+    muni_path : str, optional
+        Absolute path to municipality shapefile. If provided, takes precedence over 
+        bounds_dir + muni_shapefile.
+    
+    Returns
+    -------
+    tuple
+        (municipalities_gdf, counties_gdf) GeoDataFrames, or (None, None) if files not found
+    """
+    municipalities = None
+    counties = None
+    
+    # Load county boundaries
+    if county_path is None:
+        if county_shapefile is None:
+            county_shapefile = "UtahCountyBoundaries/ut_cnty_2020_bound.shp"
+        county_path = os.path.join(bounds_dir, county_shapefile)
+    
+    if os.path.exists(county_path):
+        counties = gpd.read_file(county_path)
+        # Project to target CRS if needed
+        if counties.crs != target_crs:
+            counties = counties.to_crs(target_crs)
+        print(f"Loaded {len(counties)} counties from {county_path}")
+    else:
+        print(f"Warning: County shapefile not found at {county_path}")
+    
+    # Load municipality boundaries
+    if muni_path is None:
+        if muni_shapefile is None:
+            muni_shapefile = "UtahMunicipalBoundaries/Municipalities.shp"
+        muni_path = os.path.join(bounds_dir, muni_shapefile)
+    
+    if os.path.exists(muni_path):
+        municipalities = gpd.read_file(muni_path)
+        # Project to target CRS if needed
+        if municipalities.crs != target_crs:
+            municipalities = municipalities.to_crs(target_crs)
+        print(f"Loaded {len(municipalities)} municipalities from {muni_path}")
+    else:
+        print(f"Warning: Municipality shapefile not found at {muni_path}")
+    
+    return municipalities, counties
+
 def generate_boundaries_from_geodata(geodata, muni_column="MUNIID", county_column="COUNTYID"):
     """
     Generate municipality and county boundary GeoDataFrames by dissolving the geodata.
+    
+    This function is deprecated in favor of load_boundaries_from_shapefiles() which uses
+    the official boundary shapefiles in data/bounds.
     
     Parameters
     ----------
