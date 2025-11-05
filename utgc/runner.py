@@ -82,6 +82,82 @@ def random_spanning_tree_with_edge_penalties(
 def _assignment_hash(partition):
     return hash(frozenset(partition.assignment.items()))
 
+def _reock_score(partition):
+    """
+    Compute Reock score for each district in the partition.
+    
+    Reock score is the ratio of district area to the area of the minimum
+    bounding circle that contains the district. Higher values indicate
+    more compact districts.
+    
+    Parameters
+    ----------
+    partition : Partition
+        The partition to compute Reock scores for
+        
+    Returns
+    -------
+    dict
+        Dictionary mapping district ID to Reock score
+    """
+    from shapely.geometry import Point
+    from shapely.ops import unary_union
+    import math
+    
+    scores = {}
+    for district in partition:
+        # Get geometries for all nodes in this district
+        geometries = []
+        for node in partition.parts[district]:
+            node_data = partition.graph.nodes[node]
+            geom = node_data.get('geometry')
+            if geom is not None:
+                geometries.append(geom)
+        
+        if not geometries:
+            scores[district] = 0.0
+            continue
+        
+        # Union all geometries in the district
+        district_geom = unary_union(geometries)
+        district_area = district_geom.area
+        
+        # Compute minimum bounding circle
+        # Get the bounding box and compute the circle that encompasses it
+        minx, miny, maxx, maxy = district_geom.bounds
+        
+        # Center of bounding box
+        center_x = (minx + maxx) / 2.0
+        center_y = (miny + maxy) / 2.0
+        center = Point(center_x, center_y)
+        
+        # Find the maximum distance from center to any point in the geometry
+        # This gives us the radius of the minimum bounding circle
+        max_dist = 0.0
+        for geom in geometries:
+            if hasattr(geom, 'exterior'):
+                coords = geom.exterior.coords
+            elif hasattr(geom, 'coords'):
+                coords = geom.coords
+            else:
+                continue
+            for coord in coords:
+                pt = Point(coord)
+                dist = center.distance(pt)
+                if dist > max_dist:
+                    max_dist = dist
+        
+        # Area of minimum bounding circle
+        bounding_circle_area = math.pi * (max_dist ** 2)
+        
+        # Reock score
+        if bounding_circle_area > 0:
+            scores[district] = district_area / bounding_circle_area
+        else:
+            scores[district] = 0.0
+    
+    return scores
+
 class NotEqual(Validator):
     """
     A constraint that is satisfied if the proposed partition is not the same as
@@ -166,6 +242,7 @@ class EnsembleRunner:
         self._constraints = [contiguous,]
 
         self._tilted_run_params = {}
+        self._optimization_scheme_params = {}
         # Updaters to ignore from the output file
         self._ignored_updaters = set()
 
@@ -841,28 +918,69 @@ class EnsembleRunner:
 
         return self
 
+    # Updaters
     def add_updater_function(self,
+        name: str,
+        function: Callable[[Partition], Any]
+    ) -> 'EnsembleRunner':
+        """
+        Add a custom updater function to the runner.
+
+        Parameters
+        ----------
+        name : str
+            Name of the updater function.
+        function : Callable[[Partition], Any]
+            Function to add to the runner.
+
+        Returns
+        -------
+        EnsembleRunner
+            Self.
+        """
+        if isinstance(function, str):
+            print(f"!!! Updater function '{name} ({function})' is a string. This usually occurs when restoring a runner from a config file. Please use .add_updater_function() to add this function manually.")
+            return self
+        else:
+            # Record the construction history
+            self._construction_history.append({
+                "method": "add_updater_function",
+                "kwargs": {
+                    "name": name,
+                    "function": function.__name__,
+                },
+            })
+
+        self._add_updater_function(name=name, function=function)
+
+        return self
+
+    def _add_updater_function(self,
         name: str,
         function: Callable[[Partition], Any],
         ignore_output: bool = False,
     ) -> 'EnsembleRunner':
-        if isinstance(function, str):
-            print(f"!!! Updater function '{name} ({function})' is a string. This usually occurs when restoring a runner from a config file. Please use .add_updater_function() to add this function manually.")
-            return self
+        """
+        Internal method to add an updater function to the runner. Does not record the construction history (assumes this is done by the caller).
 
-        # Record the construction history
-        self._construction_history.append({
-            "method": "add_updater_function",
-            "kwargs": {
-                "name": name,
-                "function": function.__name__,
-                "ignore_output": ignore_output
-            },
-        })
-    
+        Parameters
+        ----------
+        name : str
+            Name of the updater function.
+        function : Callable[[Partition], Any]
+            Function to add to the runner.
+        ignore_output : bool, optional
+            Whether to ignore the output of the updater function in the serialized output. Defaults to False.
+
+        Returns
+        -------
+        EnsembleRunner
+            Self.
+        """
         if name in self._updaters:
             print(f"Updater function '{name}' already exists. Overwriting...")
-        self._updaters[name] = function.__name__
+        
+        self._updaters[name] = function
         print(f"  Added updater function: '{name}'")
 
         if ignore_output: 
@@ -880,38 +998,101 @@ class EnsembleRunner:
         print(f"    Ignoring updater in output: '{name}'")
         return self
 
-    # Tilted run
-    def make_tilted_run(self,
-        less_compact_probability: float = 1.0,
-        compactness_score: Literal["cut_edges", "polsby_popper"] = "polsby_popper"
-    ) -> 'EnsembleRunner':
+    # Shape metrics
+    def add_shape_metrics(self, metrics: List[str]) -> 'EnsembleRunner':
+        """
+        Add shape metrics (Polsby-Popper and Reock score) as updaters.
+        These metrics are computed independently of optimization.
+
+        Parameters
+        ----------
+        metrics : List[str]
+            List of shape metrics to add. Options:
+            - "polsby_popper"
+            - "reock_score"
+
+        Returns
+        -------
+        EnsembleRunner
+            Self.
+        """
         # Record the construction history
         self._construction_history.append({
-            "method": "make_tilted_run",
+            "method": "add_shape_metrics",
             "kwargs": {
-                "less_compact_probability": less_compact_probability,
-                "compactness_score": compactness_score
+                "metrics": metrics,
             }
         })
 
-        if less_compact_probability < 1.0:
-            self._tilted_run_params["less_compact_probability"] = less_compact_probability
-            self._tilted_run_params["compactness_score"] = compactness_score
-            print(f"Tilted run: less compact probability {less_compact_probability}, compactness score {compactness_score}")
+        for metric in metrics:
+            if metric not in self._updaters:
+                if metric == "polsby_popper":
+                    if "perimeter" not in self._updaters:
+                        self._add_updater_function("perimeter", updaters.perimeter, ignore_output=True)
+                    if "area" not in self._updaters:
+                        self._add_updater_function("area", updaters.Tally("area", alias="area"), ignore_output=True)
+                    if "polsby_popper" not in self._updaters:
+                        self._add_updater_function("polsby_popper", polsby_popper)
+                elif metric == "reock_score":
+                    self._add_updater_function("reock_score", _reock_score)
+                    print(f"  Added Reock score shape metric")
+                else:
+                    raise ValueError(f"Unknown shape metric: '{metric}'")
 
-            # Add updaters for whichever score was selected
-            if compactness_score == "cut_edges":
-                self.add_updater_function("cut_edges", updaters.cut_edges)
-            elif compactness_score == "polsby_popper":
-                if "perimeter" not in self._updaters:
-                    self.add_updater_function("perimeter", updaters.perimeter)
-                if "area" not in self._updaters:
-                    self.add_updater_function("area", updaters.Tally("area", alias="area"))
-                if "polsby_popper" not in self._updaters:
-                    self.add_updater_function("polsby_popper", polsby_popper)
-        else:
-            self._tilted_run_params = {}
-            print(f"Tilted run: disabled")
+        return self
+
+    # Optimization schemes
+    def add_optimization_scheme(self,
+        scheme: str,
+        updater: str,
+        **kwargs
+    ) -> 'EnsembleRunner':
+        """
+        Set the optimization scheme for the ensemble run.
+
+        Parameters
+        ----------
+        scheme : str
+            Name of the optimization scheme. Options:
+            - "neutral": Standard MarkovChain (default behavior)
+            - "tilted": SingleMetricOptimizer with tilted_run
+            - "short_bursts": SingleMetricOptimizer with short_bursts iterator
+        updater: str
+            Name of the updater to use for optimization. Must be added to the runner first.
+        **kwargs
+            Scheme-specific parameters:
+            - For "tilted": requires "less_compact_probability" (< 1.0), optional "maximize" (default False)
+            - For "short_bursts": accepts "burst_length" (default 100) and "num_bursts" (default ceil(num_steps / burst_length))
+
+        Returns
+        -------
+        self
+        """
+        # Record the construction history
+        self._construction_history.append({
+            "method": "add_optimization_scheme",
+            "kwargs": {
+                "scheme": scheme,
+                "updater": updater,
+                **kwargs
+            }
+        })
+
+        if scheme not in ["neutral", "tilted", "short_bursts"]:
+            raise ValueError(f"Unknown optimization scheme: '{scheme}'. Options: 'neutral', 'tilted', 'short_bursts'")
+
+        if updater not in self._updaters:
+            raise ValueError(f"Updater '{updater}' not found. Must be added to the runner first.")
+
+        self._optimization_scheme_params = {
+            "scheme": scheme,
+            "updater": updater,
+            **kwargs
+        }
+        print(f"Optimization scheme: {scheme}")
+        if kwargs:
+            print(f"  Parameters: {kwargs}")
+
         return self
     
     # Callbacks
@@ -1093,6 +1274,138 @@ class EnsembleRunner:
 
         return self
 
+    # --- Internal Run Helper Methods ---
+    def _create_optimization_metric(self, updater_name: str):
+        """
+        Create an optimization metric function from an updater name.
+        
+        Handles different updater value types:
+        - dict: sums the values (e.g., polsby_popper)
+        - set/list: uses length (e.g., cut_edges)
+        - scalar: uses directly
+        
+        Parameters
+        ----------
+        updater_name : str
+            Name of the updater to use for optimization
+            
+        Returns
+        -------
+        Callable
+            Function that takes a partition and returns a numeric optimization metric
+        """
+        def optimization_metric(partition):
+            value = partition[updater_name]
+            if isinstance(value, dict):
+                # For dict updaters (e.g., polsby_popper), sum the values
+                return sum(value.values())
+            elif isinstance(value, (set, list)):
+                # For set/list updaters (e.g., cut_edges), use length
+                return len(value)
+            else:
+                # For scalar values, use directly
+                return value
+        return optimization_metric
+
+    def _create_partition_iterator(self,
+        proposal: Callable,
+        initial_partition: Partition,
+        num_steps: int,
+    ):
+        """
+        Create a partition iterator based on the configured optimization scheme.
+
+        Parameters
+        ----------
+        proposal : Callable
+            The proposal function for generating new partitions
+        initial_partition : Partition
+            The starting partition
+        num_steps : int
+            Number of steps to run
+
+        Returns
+        -------
+        Iterator
+            Iterator over partitions
+        """
+        # Determine which scheme to use
+        # Default is "neutral" (no optimization) unless explicitly set
+        scheme_params = self._optimization_scheme_params.copy()
+        scheme = scheme_params.get("scheme", "neutral")
+
+        if scheme == "neutral":
+            chain = MarkovChain(
+                proposal=proposal,
+                constraints=self._constraints,
+                accept=accept.always_accept,
+                initial_state=initial_partition,
+                total_steps=num_steps
+            )
+            partition_iterator = chain.with_progress_bar()
+            print(f"Configured neutral run with {num_steps} steps")
+
+        elif scheme == "tilted":
+            updater_name = scheme_params.get("updater")
+            if updater_name is None:
+                raise ValueError("No updater specified for tilted optimization scheme.")
+
+            p_less_compact = scheme_params.get("less_compact_probability")
+            if p_less_compact is None or p_less_compact >= 1.0:
+                raise ValueError("Tilted scheme requires 'less_compact_probability' < 1.0 (via add_optimization_scheme(...)), got: {}".format(p_less_compact))
+
+            maximize = scheme_params.get("maximize", False)
+
+            # Create optimization metric from updater name
+            optimization_metric = self._create_optimization_metric(updater_name)
+
+            optimizer = optimization.SingleMetricOptimizer(
+                proposal=proposal,
+                constraints=self._constraints,
+                initial_state=initial_partition,
+                optimization_metric=optimization_metric,
+                maximize=maximize,
+            )
+            partition_iterator = optimizer.tilted_run(
+                num_steps,
+                p=p_less_compact,
+                with_progress_bar=True
+            )
+            print(f"Configured tilted run with {num_steps} steps and p={p_less_compact}")
+
+        elif scheme == "short_bursts":
+            updater_name = scheme_params.get("updater")
+            if updater_name is None:
+                raise ValueError("No updater specified for short_bursts optimization scheme.")
+
+            maximize = scheme_params.get("maximize", False)
+
+            # Create optimization metric from updater name
+            optimization_metric = self._create_optimization_metric(updater_name)
+
+            optimizer = optimization.SingleMetricOptimizer(
+                proposal=proposal,
+                constraints=self._constraints,
+                initial_state=initial_partition,
+                optimization_metric=optimization_metric,
+                maximize=maximize,
+            )
+
+            burst_length = scheme_params.get("burst_length", 100)
+            num_bursts = scheme_params.get("num_bursts", ceil(num_steps / burst_length))
+
+            partition_iterator = optimizer.short_bursts(
+                burst_length,
+                num_bursts,
+                with_progress_bar=True
+            )
+            print(f"Configured short_bursts run with {num_bursts} bursts of {burst_length} steps each")
+
+        else:
+            raise ValueError(f"Unknown optimization scheme: '{scheme}'")
+
+        return partition_iterator
+
     # --- Run Execution ---
     def run(self,
         name: Optional[str] = None,
@@ -1117,42 +1430,12 @@ class EnsembleRunner:
         
         proposal = self._proposal(initial_partition)
 
-        if (self._tilted_run_params
-            and self._tilted_run_params["less_compact_probability"] < 1.0
-            ):
-            # Whether to minimize or maximize the compactness score; depends on which score is being used
-            maximize = (
-                self._tilted_run_params["compactness_score"] == "polsby_popper"
-            )
-
-            if self._tilted_run_params["compactness_score"] == "cut_edges":
-                optim = lambda p: len(p["cut_edges"])
-            elif self._tilted_run_params["compactness_score"] == "polsby_popper":
-                optim = lambda p: sum(p["polsby_popper"].values())
-
-            optimizer = optimization.SingleMetricOptimizer(
-                proposal=proposal,
-                constraints=self._constraints,
-                initial_state=initial_partition,
-                optimization_metric=optim,
-                maximize=maximize,
-            )
-            partition_iterator = optimizer.tilted_run(
-                num_steps,
-                p=self._tilted_run_params["less_compact_probability"],
-                with_progress_bar=True
-            )
-            print(f"Configured tilted run with {num_steps} steps and p={self._tilted_run_params['less_compact_probability']}")
-        else:
-            chain = MarkovChain(
-                proposal=proposal,
-                constraints=self._constraints,
-                accept=accept.always_accept,
-                initial_state=initial_partition,
-                total_steps=num_steps
-            )
-            partition_iterator = chain.with_progress_bar()
-            print(f"Configured neutral run with {num_steps} steps")
+        # Create partition iterator using configured optimization scheme
+        partition_iterator = self._create_partition_iterator(
+            proposal=proposal,
+            initial_partition=initial_partition,
+            num_steps=num_steps
+        )
 
         # Create the output directory if it doesn't exist
         if output_dir:
@@ -1164,7 +1447,7 @@ class EnsembleRunner:
             "population": self._population_params,
             "region_surcharges": self._region_surcharges,
             "edge_penalties": self._edge_penalty_params,
-            "tilted_run": self._tilted_run_params,
+            "optimization_scheme": self._optimization_scheme_params,
             "updater_names": list(self._updaters.keys()),
             "ignored_updaters": list(self._ignored_updaters),
             "constraints": self._constraint_params,
