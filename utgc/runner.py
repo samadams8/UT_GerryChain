@@ -487,6 +487,7 @@ class EnsembleRunner:
         elections: Optional[List[str]] = None,
         parties: Optional[List[str]] = ['R', 'D', '-'],
         parties_to_columns_override: Optional[Dict[str, Dict[str, str]]] = {},
+        skip_if_missing_parties: bool = True,
         ignore_output: bool = True,
     ) -> 'EnsembleRunner':
         """
@@ -512,6 +513,8 @@ class EnsembleRunner:
             mapping for specific elections. Keys must be election names in the
             form '{YYYY}{OFFICE}' (e.g., '2024GOV'), and values are mappings
             of party keys to column names (e.g., {'R1': 'G24GOVRHEN'}).
+        skip_if_missing_parties : bool
+            Whether to skip adding updaters if any requested parties are missing from the geodata.
         ignore_output : bool
             Whether to ignore these updaters in the serialized output.
 
@@ -521,16 +524,17 @@ class EnsembleRunner:
             Enables chaining.
         """
         # Record the construction history
-        self._construction_history.append({
-            "method": "add_election_updaters",
-            "kwargs": {
-                "years": years,
-                "elections": elections,
-                "parties": parties,
-                "parties_to_columns_override": parties_to_columns_override,
-                "ignore_output": ignore_output,
-            },
-        })
+        # self._construction_history.append({
+        #     "method": "add_election_updaters",
+        #     "kwargs": {
+        #         "years": years,
+        #         "elections": elections,
+        #         "parties": parties,
+        #         "parties_to_columns_override": parties_to_columns_override,
+        #         "skip_if_missing_parties": skip_if_missing_parties,
+        #         "ignore_output": ignore_output,
+        #     },
+        # })
 
         # Collect all election-like columns from geodata
         # Filter: must start with 'G' followed immediately by two digits
@@ -650,11 +654,21 @@ class EnsembleRunner:
                 self.make_total_column(total_col, cols)
 
             # Register the election updater
-            self.add_election_updater(
-                name=ename,
-                parties_to_columns=parties_to_columns,
-                ignore_output=ignore_output,
-            )
+            if (
+                not skip_if_missing_parties
+                or all( (
+                    # Check if the party is included in the selected columns
+                    p in parties_to_columns.keys()
+                    # Check if the party has a multi-column assignment
+                    or any( c.startswith(p) for c in parties_to_columns.keys() )
+                    ) for p in parties
+                )
+            ):
+                self.add_election_updater(
+                    name=ename,
+                    parties_to_columns=parties_to_columns,
+                    ignore_output=ignore_output,
+                )
 
         return self
     
