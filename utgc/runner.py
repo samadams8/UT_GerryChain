@@ -1216,3 +1216,61 @@ class EnsembleRunner:
             partition.parent = None
         
         output_file_handle.close()
+
+    def compute_metrics_for_map(self, shapefile_path: str) -> Dict[str, Any]:
+        """
+        Compute metrics for a user-defined map (shapefile) using the same
+        updater system as ensemble generation.
+        
+        :param shapefile_path: Path to the shapefile containing the map
+        :return: Dictionary of metric values matching the format of ensemble results
+        """
+        import geopandas as gpd
+        import maup
+        from gerrychain import GeographicPartition
+        
+        # Load the user map
+        user_map = gpd.read_file(shapefile_path)
+        
+        # Ensure same CRS
+        if self.geodata.crs != user_map.crs:
+            user_map = user_map.to_crs(self.geodata.crs)
+        
+        # Assign districts to geodata using maup
+        geodata_copy = self.geodata.copy()
+        geodata_copy['user_assignment'] = maup.assign(geodata_copy, user_map)
+        
+        # Sync assignment to graph nodes
+        for node in self.graph.nodes:
+            if node in geodata_copy.index:
+                self.graph.nodes[node]['user_assignment'] = geodata_copy.loc[node, 'user_assignment']
+        
+        # Create partition with user assignment and all updaters
+        partition = GeographicPartition(
+            self.graph,
+            assignment="user_assignment",
+            updaters=self._updaters
+        )
+        
+        # Collect metrics, matching the format used in ensemble generation
+        metrics = {}
+        for updater_name in self._updaters.keys():
+            if updater_name in self._ignored_updaters:
+                continue
+            
+            try:
+                value = partition[updater_name]
+                if isinstance(value, dict):
+                    # Sort dictionary by key for consistency
+                    metrics[updater_name] = {
+                        k: v for k, v in sorted(value.items())
+                    }
+                else:
+                    # Convert to string to match JSONL serialization format
+                    metrics[updater_name] = str(value)
+            except Exception as e:
+                # If updater fails, skip it (some updaters may not work on arbitrary partitions)
+                print(f"  Warning: Could not compute '{updater_name}': {e}")
+                metrics[updater_name] = None
+        
+        return metrics

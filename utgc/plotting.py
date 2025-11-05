@@ -486,14 +486,16 @@ def draw_time_series(ax, df: pd.DataFrame, metric_names: Union[str, List[str]],
     ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
 
 def plot_distribution_histogram(values: pd.Series, metric_name: str, output_path: str, 
-                               reference_values: Optional[List[Any]] = None):
+                               reference_values: Optional[Union[List[Any], Dict[str, Any]]] = None):
     """
     Plot histogram of a map-level metric.
     
     :param values: Series of values to plot
     :param metric_name: Name of the metric
     :param output_path: Path to save the plot
-    :param reference_values: Optional list of reference values to overlay
+    :param reference_values: Optional list or dict of reference values to overlay.
+                            If dict, keys are map labels and values are scalar values.
+                            If list, will be labeled as "Reference 1", "Reference 2", etc.
     """
     plt.figure(figsize=(10, 6))
     
@@ -502,12 +504,27 @@ def plot_distribution_histogram(values: pd.Series, metric_name: str, output_path
     
     # Add reference lines if provided
     if reference_values:
-        colors = ['red', 'blue', 'green', 'orange', 'purple']
-        for i, ref_val in enumerate(reference_values):
+        colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
+        
+        # Handle both list (backward compatibility) and dict (new format)
+        if isinstance(reference_values, dict):
+            items = list(reference_values.items())
+        else:
+            # Convert list to dict with auto-generated labels
+            items = [(f"Reference {i+1}", val) for i, val in enumerate(reference_values)]
+        
+        for i, (label, ref_val) in enumerate(items):
             if ref_val is not None:
-                color = colors[i % len(colors)]
-                plt.axvline(ref_val, color=color, linestyle='--', linewidth=2, 
-                           label=f'Reference {i+1}: {ref_val:.3f}')
+                try:
+                    # Try to convert to float if it's a string
+                    if isinstance(ref_val, str):
+                        ref_val = float(ref_val)
+                    color = colors[i % len(colors)]
+                    plt.axvline(ref_val, color=color, linestyle='--', linewidth=2, 
+                               label=f'{label}: {ref_val:.3f}')
+                except (ValueError, TypeError):
+                    # Skip if value can't be converted to float
+                    continue
     
     plt.xlabel(metric_name)
     plt.ylabel('Density')
@@ -528,7 +545,7 @@ def plot_distribution_histogram(values: pd.Series, metric_name: str, output_path
     print(f"✓ Histogram plot saved to {os.path.basename(output_path)}")
 
 def plot_distribution_violin(df: pd.DataFrame, metric_name: str, output_path: str,
-                            reference_values: Optional[List[Dict[str, Any]]] = None,
+                            reference_values: Optional[Union[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]] = None,
                             sort_districts: bool = False):
     """
     Plot violin plot of a district-level metric.
@@ -536,7 +553,9 @@ def plot_distribution_violin(df: pd.DataFrame, metric_name: str, output_path: st
     :param df: DataFrame containing the ensemble data
     :param metric_name: Name of the metric to plot
     :param output_path: Path to save the plot
-    :param reference_values: Optional list of reference value dictionaries
+    :param reference_values: Optional list or dict of reference value dictionaries.
+                            If dict, keys are map labels and values are district-level dicts.
+                            If list, will be labeled as "Reference 1", "Reference 2", etc.
     :param sort_districts: If True, sort district values at each step
     """
     if metric_name not in df.columns:
@@ -605,21 +624,60 @@ def plot_distribution_violin(df: pd.DataFrame, metric_name: str, output_path: st
     
     # Add reference lines if provided
     if reference_values:
-        colors = ['red', 'blue', 'green', 'orange', 'purple']
-        for i, ref_dict in enumerate(reference_values):
+        colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
+        
+        # Handle both list (backward compatibility) and dict (new format)
+        if isinstance(reference_values, dict):
+            items = list(reference_values.items())
+        else:
+            # Convert list to dict with auto-generated labels
+            items = [(f"Reference {i+1}", val) for i, val in enumerate(reference_values)]
+        
+        labels_shown = set()  # Track which labels we've already shown
+        for i, (label, ref_dict) in enumerate(items):
             if ref_dict and isinstance(ref_dict, dict):
                 color = colors[i % len(colors)]
-                for district, value in ref_dict.items():
-                    if not pd.isna(value):
-                        if sort_districts:
-                            # For sorted plots, we'd need to determine the rank
-                            # This is a simplified approach
-                            plt.axhline(value, color=color, linestyle='--', alpha=0.7, 
-                                       label=f'Reference {i+1}')
-                        else:
-                            plt.axhline(value, color=color, linestyle='--', alpha=0.7, 
-                                       label=f'Reference {i+1}')
-                break  # Only show one reference line for simplicity
+                
+                if sort_districts:
+                    # For sorted plots, sort the reference values and show them at each rank
+                    sorted_ref_values = sorted(ref_dict.values())
+                    for rank_idx, value in enumerate(sorted_ref_values):
+                        if not pd.isna(value):
+                            try:
+                                # Try to convert to float if it's a string
+                                if isinstance(value, str):
+                                    value = float(value)
+                                # Show one horizontal line per reference map with label
+                                if label not in labels_shown:
+                                    plt.axhline(value, color=color, linestyle='--', alpha=0.7, 
+                                               label=label)
+                                    labels_shown.add(label)
+                                else:
+                                    plt.axhline(value, color=color, linestyle='--', alpha=0.7)
+                            except (ValueError, TypeError):
+                                continue
+                else:
+                    # For unsorted plots, show reference lines for each district
+                    for district, value in ref_dict.items():
+                        if not pd.isna(value):
+                            try:
+                                # Try to convert to float if it's a string
+                                if isinstance(value, str):
+                                    value = float(value)
+                                
+                                # Find the district in the plot
+                                district_label = f'District {district}'
+                                if district_label in plot_df['District'].values:
+                                    # Show horizontal line for this district
+                                    plt.axhline(value, color=color, linestyle='--', alpha=0.7)
+                                    if label not in labels_shown:
+                                        # Add label to legend only once per map
+                                        plt.axhline(value, color=color, linestyle='--', 
+                                                   alpha=0.7, label=label)
+                                        labels_shown.add(label)
+                            except (ValueError, TypeError):
+                                # Skip if value can't be converted to float
+                                continue
     
     plt.grid(True, alpha=0.3)
     if reference_values:

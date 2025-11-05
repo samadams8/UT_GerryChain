@@ -14,14 +14,17 @@ class ResultSet:
     This object holds the summary DataFrame of all generated plans and provides
     methods for analysis, plotting, and saving.
     """
-    def __init__(self, output_file: str):
+    def __init__(self, output_file: str, runner: Optional[Any] = None):
         """
         Initializes the ResultSet.
 
         :param output_file: Path to the JSONL output file from an ensemble run.
+        :param runner: Optional EnsembleRunner object to reuse for computing metrics.
+                      If not provided, will be reconstructed from config when needed.
         """
         self.output_file = output_file
         self.output_dir = os.path.dirname(output_file)
+        self._runner = runner
         
         # Parse JSONL into DataFrame 
         self._parse_jsonl()
@@ -163,14 +166,20 @@ class ResultSet:
         
         return self
 
-    def plot_metric_histogram(self, metric_name: str, user_maps: Optional[List[str]] = None, 
-                             save_path: Optional[str] = None, show: bool = False,
-                             fig_name: Optional[str] = None):
+    def plot_metric_histogram(self,
+            metric_name: str, 
+            reference_values: Optional[Union[List[Any], Dict[str, Any]]] = None,
+            save_path: Optional[str] = None,
+            show: bool = False,
+            fig_name: Optional[str] = None
+        ):
         """
         Plot histogram of a map-level metric.
         
         :param metric_name: Name of the metric to plot
-        :param user_maps: Optional list of shapefile paths to overlay as reference lines
+        :param reference_values: Optional dict of reference values to overlay.
+                                 Keys are map labels and values are scalar metric values.
+                                 Can also be a list for backward compatibility.
         :param save_path: Optional path to save the plot (defaults to output directory)
         :param show: Whether to display the plot interactively
         :param fig_name: Optional custom name for the saved file (without extension)
@@ -186,15 +195,6 @@ class ResultSet:
         # Extract values for the metric
         values = self.df[metric_name].dropna()
         
-        # Compute reference values if user maps provided
-        reference_values = None
-        if user_maps:
-            reference_values = []
-            for map_path in user_maps:
-                user_metrics = self.compute_metrics_for_map(map_path)
-                if metric_name in user_metrics:
-                    reference_values.append(user_metrics[metric_name])
-        
         plot_distribution_histogram(
             values=values,
             metric_name=metric_name,
@@ -208,14 +208,19 @@ class ResultSet:
         
         return self
 
-    def plot_metric_violin(self, metric_name: str, user_maps: Optional[List[str]] = None, 
-                          save_path: Optional[str] = None, show: bool = False, 
-                          sort_districts: bool = True, fig_name: Optional[str] = None):
+    def plot_metric_violin(self,
+        metric_name: str,
+        reference_values: Optional[Union[List[Dict[str, Any]], Dict[str, Dict[str, Any]]]] = None,
+        save_path: Optional[str] = None, show: bool = False,
+        sort_districts: bool = True, fig_name: Optional[str] = None
+    ):
         """
         Plot violin plot of a district-level metric.
         
         :param metric_name: Name of the metric to plot
-        :param user_maps: Optional list of shapefile paths to overlay as reference lines
+        :param reference_values: Optional dict of reference values to overlay.
+                                 Keys are map labels and values are district-level dicts.
+                                 Can also be a list for backward compatibility.
         :param save_path: Optional path to save the plot (defaults to output directory)
         :param show: Whether to display the plot interactively
         :param sort_districts: If True, sort district values at each step before plotting
@@ -228,15 +233,6 @@ class ResultSet:
                 save_path = os.path.join(self.output_dir, f"{fig_name}.png")
             else:
                 save_path = os.path.join(self.output_dir, f"{metric_name}_distribution.png")
-        
-        # Compute reference values if user maps provided
-        reference_values = None
-        if user_maps:
-            reference_values = []
-            for map_path in user_maps:
-                user_metrics = self.compute_metrics_for_map(map_path)
-                if metric_name in user_metrics:
-                    reference_values.append(user_metrics[metric_name])
         
         plot_distribution_violin(
             df=self.df,
@@ -254,65 +250,26 @@ class ResultSet:
 
     def compute_metrics_for_map(self, shapefile_path: str) -> Dict[str, Any]:
         """
-        Compute metrics for a user-defined map (shapefile).
+        Compute metrics for a user-defined map (shapefile) using the same
+        updater system as ensemble generation.
         
         :param shapefile_path: Path to the shapefile containing the map
-        :return: Dictionary of metric values
+        :return: Dictionary of metric values matching the format of ensemble results
         """
-        import geopandas as gpd
-        import maup
-        from gerrychain import Graph, GeographicPartition
+        from .runner import EnsembleRunner
         
-        # Load the user map
-        user_map = gpd.read_file(shapefile_path)
+        # Get or reconstruct runner
+        if self._runner is not None:
+            runner = self._runner
+        else:
+            # Reconstruct runner from config
+            config_path = os.path.join(self.output_dir, "config.yaml")
+            if not os.path.exists(config_path):
+                raise ValueError("Cannot compute metrics: config.yaml not found and no runner provided")
+            runner = EnsembleRunner.from_config(config_path)
         
-        # Reconstruct the graph and geodata from config
-        # This is a simplified version - in practice, you'd need to reconstruct
-        # the full graph with all the updaters from the original run
-        geodata_path = self.metadata.get('initialization', {}).get('pop_geodata_path')
-        if not geodata_path:
-            raise ValueError("Cannot reconstruct graph: pop_geodata_path not found in config")
-        
-        geodata = gpd.read_file(geodata_path)
-        
-        # Ensure same CRS
-        if geodata.crs != user_map.crs:
-            user_map = user_map.to_crs(geodata.crs)
-        
-        # Assign districts to geodata
-        geodata['user_assignment'] = maup.assign(geodata, user_map)
-        
-        # Build graph
-        graph = Graph.from_geodataframe(geodata)
-        
-        # Create partition with basic updaters
-        # Note: This is simplified - you'd need to reconstruct all updaters from config
-        updaters = {
-            "population": lambda p: {node: geodata.loc[node, 'TOTPOP'] for node in graph.nodes}
-        }
-        
-        partition = GeographicPartition(
-            graph, 
-            assignment="user_assignment", 
-            updaters=updaters
-        )
-        
-        # Extract metrics (simplified - would need to match original updaters)
-        metrics = {}
-        for metric_name in self.df.columns:
-            if metric_name == 'step':
-                continue
-            try:
-                if self._classify_metric_type(metric_name) == 'map_level':
-                    # For map-level metrics, we'd need to implement the actual computation
-                    # This is a placeholder
-                    metrics[metric_name] = None
-                else:
-                    # For district-level metrics, we'd need to implement the actual computation
-                    # This is a placeholder
-                    metrics[metric_name] = {}
-            except:
-                metrics[metric_name] = None
+        # Use runner's method to compute metrics
+        metrics = runner.compute_metrics_for_map(shapefile_path)
         
         return metrics
 
