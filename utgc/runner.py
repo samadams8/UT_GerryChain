@@ -10,6 +10,7 @@ import yaml
 from math import ceil
 import json
 from datetime import datetime
+import networkx as nx
 
 from gerrychain import Graph, GeographicPartition, MarkovChain, Partition, updaters, accept, optimization
 from gerrychain.proposals import recom
@@ -116,9 +117,24 @@ class EnsembleRunner:
     
     @property
     def initial_partition(self) -> Partition:
-        return GeographicPartition(
+        tmp = GeographicPartition(
             self.graph, assignment="initial_plan", updaters=self._updaters
         )
+
+        if not contiguous(tmp):
+            repaired_assignment = self._repair_contiguity(tmp)
+            
+            # Create a new partition with the repaired assignment
+            tmp = GeographicPartition(
+                self.graph,
+                assignment=repaired_assignment,
+                updaters=self._updaters
+            )
+
+        if not contiguous(tmp):
+            warn("Contiguity repair may not have fully resolved all issues. You should check your initial plan or population geodata for compatibility issues.")
+        
+        return tmp
 
     def available_election_columns(self, years: List[int], offices: List[str]) -> List[str]:
         available_columns = set(self.geodata.columns)
@@ -1014,6 +1030,128 @@ class EnsembleRunner:
 
         return geodata, initial_plan
 
+    def _repair_contiguity(self, partition: Partition, max_iterations: int = 10) -> Dict:
+        """
+        Repair non-contiguous districts by reassigning disconnected components
+        to adjacent districts. This function iterates until contiguity is achieved
+        or max_iterations is reached.
+        
+        Parameters
+        ----------
+        partition : Partition
+            The partition to repair
+        max_iterations : int, optional
+            Maximum number of repair iterations, by default 10
+            
+        Returns
+        -------
+        Dict
+            A repaired assignment dictionary
+        """
+        graph = partition.graph
+        repaired_assignment = dict(partition.assignment)
+        
+        # Create a temporary partition to check contiguity
+        def _is_contiguous(assignment_dict):
+            temp_partition = GeographicPartition(
+                graph,
+                assignment=assignment_dict,
+                updaters={}
+            )
+            return contiguous(temp_partition)
+        
+        for iteration in range(max_iterations):
+            if _is_contiguous(repaired_assignment):
+                break
+            
+            # Handle unassigned nodes first
+            unassigned_nodes = [
+                node for node in graph.nodes 
+                if repaired_assignment[node] is None or pd.isna(repaired_assignment[node])
+            ]
+            
+            for node in unassigned_nodes:
+                # Find adjacent districts
+                neighbors = list(graph.neighbors(node))
+                adjacent_districts = []
+                for neighbor in neighbors:
+                    neighbor_dist = repaired_assignment.get(neighbor)
+                    if neighbor_dist is not None and not pd.isna(neighbor_dist):
+                        adjacent_districts.append(neighbor_dist)
+                
+                if adjacent_districts:
+                    # Assign to the most common adjacent district
+                    repaired_assignment[node] = max(set(adjacent_districts), 
+                                                   key=adjacent_districts.count)
+                else:
+                    # No adjacent districts found, assign to first available district
+                    available_districts = [d for d in set(repaired_assignment.values()) 
+                                         if d is not None and not pd.isna(d)]
+                    if available_districts:
+                        repaired_assignment[node] = random.choice(available_districts)
+            
+            # Now repair non-contiguous districts
+            districts_to_check = set(repaired_assignment.values())
+            districts_to_check.discard(None)
+            
+            repairs_made = False
+            for district in districts_to_check:
+                # Get all nodes in this district
+                district_nodes = [node for node in graph.nodes 
+                                if repaired_assignment[node] == district]
+                
+                if not district_nodes:
+                    continue
+                    
+                # Find connected components within this district
+                district_subgraph = graph.subgraph(district_nodes)
+                components = list(nx.connected_components(district_subgraph))
+                
+                if len(components) <= 1:
+                    # District is already contiguous
+                    continue
+                
+                repairs_made = True
+                # Sort components by size (largest first)
+                components = sorted(components, key=len, reverse=True)
+                
+                # Keep the largest component in the original district
+                # Reassign smaller components to adjacent districts
+                for component in components[1:]:
+                    # Find adjacent districts for this component
+                    neighbor_districts = []
+                    for node in component:
+                        neighbors = list(graph.neighbors(node))
+                        for neighbor in neighbors:
+                            neighbor_dist = repaired_assignment.get(neighbor)
+                            if (neighbor_dist is not None and 
+                                neighbor_dist != district and 
+                                not pd.isna(neighbor_dist)):
+                                neighbor_districts.append(neighbor_dist)
+                    
+                    if neighbor_districts:
+                        # Use most common adjacent district
+                        target_district = max(set(neighbor_districts), 
+                                            key=neighbor_districts.count)
+                    else:
+                        # No adjacent districts found, try to find any available district
+                        available_districts = [d for d in districts_to_check if d != district]
+                        if available_districts:
+                            target_district = random.choice(available_districts)
+                        else:
+                            # Fallback: keep in original district (shouldn't happen)
+                            target_district = district
+                    
+                    # Reassign all nodes in this component
+                    for node in component:
+                        repaired_assignment[node] = target_district
+            
+            # If no repairs were made, break to avoid infinite loop
+            if not repairs_made:
+                break
+        
+        return repaired_assignment
+
     # --- Preconditioning Method ---
     def precondition(self,
         steps: int = 50,
@@ -1325,11 +1463,10 @@ class EnsembleRunner:
                 if isinstance(value, dict):
                     # Sort the dictionary by key
                     data[updater_name] = {
-                        k: v for k, v in sorted(value.items())
+                        str(k): v for k, v in sorted(value.items())
                     }
                 else:
-                    # Make the value a string
-                    data[updater_name] = str(value)
+                    data[updater_name] = value
             output_file_handle.write(json.dumps(data) + "\n")
             output_file_handle.flush()
 
@@ -1377,25 +1514,19 @@ class EnsembleRunner:
             updaters=self._updaters
         )
         
-        # Collect metrics, matching the format used in ensemble generation
-        metrics = {}
+        # Collect data, matching the format used in ensemble generation
+        data = {}
         for updater_name in self._updaters.keys():
             if updater_name in self._ignored_updaters:
                 continue
-            
-            try:
-                value = partition[updater_name]
-                if isinstance(value, dict):
-                    # Sort dictionary by key for consistency
-                    metrics[updater_name] = {
-                        k: v for k, v in sorted(value.items())
-                    }
-                else:
-                    # Convert to string to match JSONL serialization format
-                    metrics[updater_name] = str(value)
-            except Exception as e:
-                # If updater fails, skip it (some updaters may not work on arbitrary partitions)
-                print(f"  Warning: Could not compute '{updater_name}': {e}")
-                metrics[updater_name] = None
+
+            value = partition[updater_name]
+            if isinstance(value, dict):
+                # Sort the dictionary by key
+                data[updater_name] = {
+                    str(k): v for k, v in sorted(value.items())
+                }
+            else:
+                data[updater_name] = value
         
-        return metrics
+        return data

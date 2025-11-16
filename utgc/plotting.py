@@ -7,6 +7,8 @@ import numpy as np
 from gerrychain import GeographicPartition
 from typing import List, Optional, Dict, Any, Union
 
+from seaborn.utils import despine
+
 def plot_partisan_summary(summary_df: pd.DataFrame, elections: List[str], output_dir: str):
     """
     Creates a two-panel summary plot showing Democratic vote share distributions
@@ -172,6 +174,7 @@ def visualize_partition(
     auto_load_boundaries: bool = True,
     county_path: Optional[str] = None,
     muni_path: Optional[str] = None,
+    dpi: Optional[int] = 300,
 ):
     """
     Visualize a partition with optional municipality and county boundaries.
@@ -263,7 +266,7 @@ def visualize_partition(
     plt.tight_layout()
     # Create directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
-    plt.savefig(os.path.join(output_dir, f"step_{step:05d}.png"), dpi=300, bbox_inches='tight', facecolor='white')
+    plt.savefig(os.path.join(output_dir, f"step_{step:05d}.png"), dpi=dpi, bbox_inches='tight', facecolor='white')
     plt.close()
 
 def plot_time_series(df: pd.DataFrame,
