@@ -1030,7 +1030,7 @@ class EnsembleRunner:
 
         return geodata, initial_plan
 
-    def _repair_contiguity(self, partition: Partition, max_iterations: int = 10) -> Dict:
+    def _repair_contiguity(self, partition: Partition) -> Dict:
         """
         Repair non-contiguous districts by reassigning disconnected components
         to adjacent districts. This function iterates until contiguity is achieved
@@ -1040,8 +1040,6 @@ class EnsembleRunner:
         ----------
         partition : Partition
             The partition to repair
-        max_iterations : int, optional
-            Maximum number of repair iterations, by default 10
             
         Returns
         -------
@@ -1060,7 +1058,7 @@ class EnsembleRunner:
             )
             return contiguous(temp_partition)
         
-        for iteration in range(max_iterations):
+        for iteration in range(2*self._population_params["num_districts"]):
             if _is_contiguous(repaired_assignment):
                 break
             
