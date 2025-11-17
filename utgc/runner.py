@@ -269,16 +269,19 @@ class EnsembleRunner:
 
         if num_split is not None:
             constraint_name = f"split_{name}"
+            # Use default parameter to capture constraint_name at definition time
+            # This fixes the closure issue where all lambdas would capture the last value
             self._constraints.append(UpperBound(
-                    lambda p: p[constraint_name],
+                    lambda p, name=constraint_name: p[name],
                     num_split
                 ))
             self._constraint_params[constraint_name] = num_split
             print(f"Constraint: split max {num_split} {name}")
         if num_multi_splits is not None:
             constraint_name = f"{name}_multi_splits"
+            # Use default parameter to capture constraint_name at definition time
             self._constraints.append(UpperBound(
-                    lambda p: p[constraint_name],
+                    lambda p, name=constraint_name: p[name],
                     num_multi_splits
                 ))
             self._constraint_params[constraint_name] = num_multi_splits
@@ -414,13 +417,15 @@ class EnsembleRunner:
 
         # Add convenience updaters
         sname = f"split_{name}"
+        # Use default parameter to ensure proper closure capture
         self._updaters[sname] = \
-            lambda p: p[ls_name].get("num_split_localities", 0)
+            lambda p, ls=ls_name: p[ls].get("num_split_localities", 0)
         print(f"  Added split updater: '{sname}'")
         
-        msname = f"{name}_multi_splits"   
+        msname = f"{name}_multi_splits"
+        # Use default parameters to ensure proper closure capture
         self._updaters[msname] = \
-            lambda p: p[ls_name].get("num_parts", 0) - p[sname] - num_localities
+            lambda p, ls=ls_name, sn=sname, nl=num_localities: p[ls].get("num_parts", 0) - p[sn] - nl
         print(f"  Added multi-split updater: '{msname}'")
 
         return self
