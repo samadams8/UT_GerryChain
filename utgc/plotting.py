@@ -1,4 +1,5 @@
 import os
+from math import ceil
 import pandas as pd
 import geopandas as gpd
 import matplotlib.pyplot as plt
@@ -8,6 +9,51 @@ from gerrychain import GeographicPartition
 from typing import List, Optional, Dict, Any, Union
 
 from seaborn.utils import despine
+
+def district_plot(
+        results,
+        reference_values={},
+        highlight_interval=[0.025, 0.975],
+        relative_to_median=False
+    ):
+
+    # Calculate medians per district
+    medians = results.median()
+    if relative_to_median:
+        plot_df = results.sub(medians, axis=1)
+        plt_medians = medians.sub(medians, axis=0)
+    else:
+        plot_df = results
+        plt_medians = medians
+
+    sns.violinplot(data=plot_df, orient='v', inner=None, palette="Pastel1")
+
+    percentiles = plot_df.quantile(highlight_interval)
+
+    for i, col in enumerate(plot_df.columns):
+        y_low = percentiles.loc[highlight_interval[0], col]
+        y_high = percentiles.loc[highlight_interval[1], col]
+        y_median = plt_medians[col]
+        plt.plot([i, i], [y_low, y_high], color='black', lw=2)
+        plt.plot(i, y_median, marker='o', mfc='white', mec='k', markersize=5)
+    
+    if reference_values:
+        markers = ['o', '^', 's', 'v', 'D'] * ceil(len(reference_values) / 6)
+        colors = plt.cm.tab10.colors
+        for i, (label, ref_dict) in enumerate(reference_values.items()):
+            # No sorting; reference_values must conform to the district column order externally
+            ref_values = [ref_dict.get(col.split('_', 1)[-1], None) for col in results.columns]
+            for rank_idx, value in enumerate(ref_values):
+                if value is None:
+                    continue  # skip if data not provided for this district
+                if relative_to_median:
+                    value = value - medians.iloc[rank_idx]
+                plt.plot(rank_idx, value, markers[i], mec=colors[i], mfc="None", markersize=8, label=label if rank_idx == 0 else "")
+
+    if reference_values:
+        plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()
 
 def plot_partisan_summary(summary_df: pd.DataFrame, elections: List[str], output_dir: str):
     """
