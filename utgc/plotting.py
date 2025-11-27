@@ -10,6 +10,64 @@ from typing import List, Optional, Dict, Any, Union
 
 from seaborn.utils import despine
 
+def distribution_plot(
+    results,
+    reference_values={},
+    highlight_interval=[0.025, 0.975],
+    relative_to_median=False,
+    is_continuous=True,
+    ):
+    if not results.ndim == 1:
+        raise ValueError("distribution_plot only supports 1D results")
+
+    # Calculate medians per district
+    medians = results.median()
+    if relative_to_median:
+        plot_df = results - medians
+        plt_medians = medians - medians
+    else:
+        plot_df = results
+        plt_medians = medians
+
+
+    percentiles = plot_df.quantile(highlight_interval)
+
+    x_low = percentiles.loc[highlight_interval[0]]
+    x_high = percentiles.loc[highlight_interval[1]]
+    x_median = plt_medians
+    plt.axvspan(x_low, x_high, color='gray', alpha=0.3)
+    
+    if is_continuous:
+        sns.kdeplot(data=plot_df, fill=True, color='black')
+        sns.rugplot(data=plot_df, color='black')
+    else:
+        sns.histplot(data=plot_df, color='gray')
+
+    plt.axvline(x_median, linestyle='--', color='white')
+
+    # Vertically oriented annotations
+    # Lower bound
+    if highlight_interval[0] > 0:
+        plt.text(x_low, plt.gca().get_ylim()[1], f'{highlight_interval[0]:.1%}', ha='center', va='bottom', fontsize=10)
+    # Median label, with tight white rounded rectangle background
+    plt.text(x_median, plt.gca().get_ylim()[1], '50%', ha='center', va='bottom', fontsize=10)
+    # Upper bound
+    if highlight_interval[1] < 1:
+        plt.text(x_high, plt.gca().get_ylim()[1], f'{highlight_interval[1]:.1%}', ha='center', va='bottom', fontsize=10)
+
+    y_max = max(plt.gca().get_ylim())
+
+    if reference_values:
+        markers = ['o', '^', 's', 'v', 'D'] * ceil(len(reference_values) / 6)
+        colors = plt.cm.tab10.colors
+
+        for i, (label, ref_val) in enumerate(reference_values.items()):
+            if relative_to_median:
+                ref_val = ref_val - medians
+            plt.plot(ref_val, y_max/20, markers[i], mec=colors[i], mfc="None", markersize=8, label=label)
+
+        plt.legend()
+
 def district_plot(
         results,
         reference_values={},
@@ -27,6 +85,7 @@ def district_plot(
         plt_medians = medians
 
     sns.violinplot(data=plot_df, orient='v', inner=None, palette="Pastel1")
+    plt.xticks(range(len(plot_df.columns)), range(1,len(plot_df.columns)+1))
 
     percentiles = plot_df.quantile(highlight_interval)
 
@@ -50,10 +109,7 @@ def district_plot(
                     value = value - medians.iloc[rank_idx]
                 plt.plot(rank_idx, value, markers[i], mec=colors[i], mfc="None", markersize=8, label=label if rank_idx == 0 else "")
 
-    if reference_values:
         plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.show()
 
 def plot_partisan_summary(summary_df: pd.DataFrame, elections: List[str], output_dir: str):
     """

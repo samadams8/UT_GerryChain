@@ -14,7 +14,6 @@ from gerrychain.constraints import Validator
 from shapely.geometry import Point
 from shapely.ops import unary_union
 
-
 def random_spanning_tree_with_edge_penalties(
     graph: nx.Graph,
     edge_penalties: Optional[Dict[Tuple[int, int], float]] = None,
@@ -66,10 +65,13 @@ def random_spanning_tree_with_edge_penalties(
         graph, algorithm="kruskal", weight="random_weight"
     )
 
-
 def _assignment_hash(partition):
-    return hash(frozenset(partition.assignment.items()))
-
+    hashes = []
+    for v in partition.parts.values():
+        hashes.append(hash(v))
+    hashes = sorted(hashes)
+    return tuple(hashes)
+    # return hash(frozenset(partition.assignment.items()))
 
 def _reock_score(partition):
     """
@@ -143,7 +145,6 @@ def _reock_score(partition):
     
     return scores
 
-
 class NotEqual(Validator):
     """
     A constraint that is satisfied if the proposed partition is not the same as
@@ -178,4 +179,3 @@ class NotEqual(Validator):
             )
 
         return partition["assignment_hash"] != partition.parent["assignment_hash"]
-
