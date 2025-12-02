@@ -15,7 +15,7 @@ def distribution_plot(
     reference_values={},
     highlight_interval=[0.025, 0.975],
     relative_to_median=False,
-    is_continuous=True,
+    use_kde=False,
     ):
     if not results.ndim == 1:
         raise ValueError("distribution_plot only supports 1D results")
@@ -37,7 +37,7 @@ def distribution_plot(
     x_median = plt_medians
     plt.axvspan(x_low, x_high, color='gray', alpha=0.3)
     
-    if is_continuous:
+    if use_kde:
         sns.kdeplot(data=plot_df, fill=True, color='black')
         sns.rugplot(data=plot_df, color='black')
     else:
@@ -45,15 +45,14 @@ def distribution_plot(
 
     plt.axvline(x_median, linestyle='--', color='white')
 
-    # Vertically oriented annotations
     # Lower bound
     if highlight_interval[0] > 0:
-        plt.text(x_low, plt.gca().get_ylim()[1], f'{highlight_interval[0]:.1%}', ha='center', va='bottom', fontsize=10)
+        plt.text(x_low, plt.gca().get_ylim()[1], f' {highlight_interval[0]:.1%}', ha='center', va='bottom', fontsize=10, rotation=90)
     # Median label, with tight white rounded rectangle background
-    plt.text(x_median, plt.gca().get_ylim()[1], '50%', ha='center', va='bottom', fontsize=10)
+    plt.text(x_median, plt.gca().get_ylim()[1], ' 50%', ha='center', va='bottom', fontsize=10, rotation=90)
     # Upper bound
     if highlight_interval[1] < 1:
-        plt.text(x_high, plt.gca().get_ylim()[1], f'{highlight_interval[1]:.1%}', ha='center', va='bottom', fontsize=10)
+        plt.text(x_high, plt.gca().get_ylim()[1], f' {highlight_interval[1]:.1%}', ha='center', va='bottom', fontsize=10, rotation=90)
 
     y_max = max(plt.gca().get_ylim())
 
