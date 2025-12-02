@@ -156,21 +156,19 @@ def efficiency_gap(pmetrics: dict) -> float:
     for district, data in pmetrics.items(): 
         if district == 'S':
             continue
-        # Get the vote shares in the district for each party
-        shares = [data[f'VoteShare_{p}'] for p in parties]
-        # Sort parties and shares by increasing vote share
-        parties, shares = zip(*sorted(zip(parties, shares), key=lambda x: x[1], reverse=True))
-        # Get the share of votes required to win the district
-        # For first-past-the-post, this is the second highest vote share
-        win_threshold = shares[1]
-
+        
+        # Use PartisanIndex for all calculations to ensure consistency
+        # Standard Efficiency Gap uses 50% of 2-party vote as threshold
+        win_threshold = 0.5
         district_turnout = data['StatewideVoteProportion']
-        # Compute the number of wasted votes, which depends on who won
+        
         for p in parties:
             v = data[f'PartisanIndex_{p}']
             if v > win_threshold:
+                # Winner wastes votes above 50%
                 wasted_votes[p] += (v - win_threshold) * district_turnout
             else:
+                # Loser wastes all votes
                 wasted_votes[p] += v * district_turnout
 
     return wasted_votes[parties[0]] - wasted_votes[parties[1]]
