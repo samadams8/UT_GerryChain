@@ -13,7 +13,7 @@ from seaborn.utils import despine
 def distribution_plot(
     results,
     reference_values={},
-    highlight_interval=[0.025, 0.975],
+    highlight_interval=[],
     relative_to_median=False,
     use_kde=False,
     ):
@@ -29,30 +29,31 @@ def distribution_plot(
         plot_df = results
         plt_medians = medians
 
-
-    percentiles = plot_df.quantile(highlight_interval)
-
-    x_low = percentiles.loc[highlight_interval[0]]
-    x_high = percentiles.loc[highlight_interval[1]]
     x_median = plt_medians
-    plt.axvspan(x_low, x_high, color='gray', alpha=0.3)
-    
+
     if use_kde:
         sns.kdeplot(data=plot_df, fill=True, color='black')
         sns.rugplot(data=plot_df, color='black')
     else:
         sns.histplot(data=plot_df, color='gray')
 
-    plt.axvline(x_median, linestyle='--', color='white')
-
-    # Lower bound
-    if highlight_interval[0] > 0:
-        plt.text(x_low, plt.gca().get_ylim()[1], f' {highlight_interval[0]:.1%}', ha='center', va='bottom', fontsize=10, rotation=90)
-    # Median label, with tight white rounded rectangle background
+    # Median
+    plt.axvline(x_median, linestyle='--', color='white' if highlight_interval else 'black')
     plt.text(x_median, plt.gca().get_ylim()[1], ' 50%', ha='center', va='bottom', fontsize=10, rotation=90)
-    # Upper bound
-    if highlight_interval[1] < 1:
-        plt.text(x_high, plt.gca().get_ylim()[1], f' {highlight_interval[1]:.1%}', ha='center', va='bottom', fontsize=10, rotation=90)
+
+    if highlight_interval:
+        percentiles = plot_df.quantile(highlight_interval)
+
+        x_low = percentiles.loc[highlight_interval[0]]
+        x_high = percentiles.loc[highlight_interval[1]]
+        plt.axvspan(x_low, x_high, color='gray', alpha=0.3)
+        # Lower bound
+        if highlight_interval[0] > 0:
+            plt.text(x_low, plt.gca().get_ylim()[1], f' {highlight_interval[0]:.1%}', ha='center', va='bottom', fontsize=10, rotation=90)
+
+        # Upper bound
+        if highlight_interval[1] < 1:
+            plt.text(x_high, plt.gca().get_ylim()[1], f' {highlight_interval[1]:.1%}', ha='center', va='bottom', fontsize=10, rotation=90)
 
     y_max = max(plt.gca().get_ylim())
 
@@ -63,14 +64,14 @@ def distribution_plot(
         for i, (label, ref_val) in enumerate(reference_values.items()):
             if relative_to_median:
                 ref_val = ref_val - medians
-            plt.plot(ref_val, y_max/20, markers[i], mec=colors[i], mfc="None", markersize=8, label=label)
+            plt.plot(ref_val, y_max/20, markers[i], mec=colors[i], mfc="None", label=label)
 
         plt.legend()
 
 def district_plot(
         results,
         reference_values={},
-        highlight_interval=[0.025, 0.975],
+        highlight_interval=[],
         relative_to_median=False
     ):
 
@@ -83,95 +84,34 @@ def district_plot(
         plot_df = results
         plt_medians = medians
 
-    sns.violinplot(data=plot_df, orient='v', inner=None, palette="Pastel1")
+    sns.violinplot(data=plot_df, orient='v', inner=None, color='gray')
     plt.xticks(range(len(plot_df.columns)), range(1,len(plot_df.columns)+1))
 
-    percentiles = plot_df.quantile(highlight_interval)
+    if highlight_interval:
+        percentiles = plot_df.quantile(highlight_interval)
 
-    for i, col in enumerate(plot_df.columns):
-        y_low = percentiles.loc[highlight_interval[0], col]
-        y_high = percentiles.loc[highlight_interval[1], col]
-        y_median = plt_medians[col]
-        plt.plot([i, i], [y_low, y_high], color='black', lw=2)
-        plt.plot(i, y_median, marker='o', mfc='white', mec='k', markersize=5)
+        for i, col in enumerate(plot_df.columns):
+            y_low = percentiles.loc[highlight_interval[0], col]
+            y_high = percentiles.loc[highlight_interval[1], col]
+            plt.plot([i, i], [y_low, y_high], color='black', lw=2)
+            y_median = plt_medians[col]
+            plt.plot(i, y_median, marker='o', mfc='white', mec='k', markersize=5)
     
     if reference_values:
         markers = ['o', '^', 's', 'v', 'D'] * ceil(len(reference_values) / 6)
         colors = plt.cm.tab10.colors
-        for i, (label, ref_dict) in enumerate(reference_values.items()):
+        for i, (label, ref_values) in enumerate(reference_values.items()):
             # No sorting; reference_values must conform to the district column order externally
-            ref_values = [ref_dict.get(col.split('_', 1)[-1], None) for col in results.columns]
+            if isinstance(ref_values, dict):
+                ref_values = [ref_values.get(col.split('_', 1)[-1], None) for col in results.columns]
             for rank_idx, value in enumerate(ref_values):
                 if value is None:
                     continue  # skip if data not provided for this district
                 if relative_to_median:
                     value = value - medians.iloc[rank_idx]
-                plt.plot(rank_idx, value, markers[i], mec=colors[i], mfc="None", markersize=8, label=label if rank_idx == 0 else "")
+                plt.plot(rank_idx, value, markers[i], mec=colors[i], mfc="None", label=label if rank_idx == 0 else "")
 
         plt.legend()
-
-def plot_partisan_summary(summary_df: pd.DataFrame, elections: List[str], output_dir: str):
-    """
-    Creates a two-panel summary plot showing Democratic vote share distributions
-    and the distribution of Republican-won seats for a given election.
-
-    :param summary_df: The DataFrame from a ResultSet.
-    :param elections: A list of election names to plot (e.g., ['20_PRE']).
-                      Currently, it plots the first election in the list.
-    :param output_dir: The directory to save the plot image.
-    """
-    if not elections:
-        print("Plotting skipped: No elections were tracked in this run.")
-        return
-
-    # For this initial version, we'll plot the first tracked election.
-    # This can be expanded to loop or select specific elections.
-    election_to_plot = elections[0]
-    
-    # Define column names based on the selected election
-    dem_share_cols = [col for col in summary_df.columns if col.startswith(f"{election_to_plot}_d_share_")]
-    rep_seats_col = f"{election_to_plot}_R_seats"
-
-    if not dem_share_cols or rep_seats_col not in summary_df.columns:
-        print(f"Plotting skipped: Missing data for election '{election_to_plot}'.")
-        return
-
-    num_districts = len(dem_share_cols)
-
-    # Create the two-panel figure
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-    fig.suptitle(f"Ensemble Analysis Summary for Election: {election_to_plot}", fontsize=16, fontweight='bold')
-
-    # --- Panel 1: Boxplot of Democratic Vote Shares ---
-    sns.boxplot(data=summary_df[dem_share_cols], ax=ax1, orient='h', whis=[1, 99])
-    ax1.set_title("Distribution of Democratic Vote Share by District", fontsize=12)
-    ax1.set_xlabel("Democratic Vote Share")
-    ax1.set_ylabel("District")
-    ax1.axvline(0.5, color='r', linestyle='--', alpha=0.7, label='50% Threshold')
-    ax1.grid(True, linestyle='--', alpha=0.5)
-    ax1.legend()
-
-    # --- Panel 2: Histogram of Republican Seats ---
-    seats_data = summary_df[rep_seats_col]
-    sns.histplot(data=seats_data, ax=ax2, discrete=True, stat="proportion")
-    ax2.set_title("Distribution of Republican Seats Won", fontsize=12)
-    ax2.set_xlabel("Number of Republican Seats")
-    ax2.set_ylabel("Proportion of Plans")
-    mean_val = seats_data.mean()
-    median_val = seats_data.median()
-    ax2.axvline(mean_val, color='red', linestyle='--', alpha=0.8, label=f'Mean: {mean_val:.2f}')
-    ax2.axvline(median_val, color='orange', linestyle='--', alpha=0.8, label=f'Median: {median_val:.0f}')
-    ax2.legend()
-    ax2.set_xlim(-0.5, num_districts + 0.5)
-    ax2.set_xticks(range(num_districts + 1))
-
-    # Save the figure
-    plt.tight_layout(rect=[0, 0, 1, 0.96]) # Adjust for suptitle
-    save_path = os.path.join(output_dir, "partisan_summary_plot.png")
-    plt.savefig(save_path, dpi=300)
-    plt.close()
-    
-    print(f"✓ Partisan summary plot saved to {os.path.basename(save_path)}")
 
 def _find_wasatch_front_bounds(counties_gdf):
         """Return padded, custom bounds for a Wasatch Front zoom.
