@@ -350,6 +350,7 @@ class EnsembleRunner:
     def penalize_edges_from_csv(self,
         csv_path: str,
         penalty: float,
+        weight_column: str = "w",
     ) -> 'EnsembleRunner':
         if not os.path.exists(csv_path):
             warn(f"Transitability edge file not found: {csv_path}. Skipping edge penalties.")
@@ -362,24 +363,38 @@ class EnsembleRunner:
             "method": "penalize_edges_from_csv",
             "kwargs": {
                 "csv_path": csv_path,
-                "penalty": penalty
+                "penalty": penalty,
+                "weight_column": weight_column,
             },
         })
 
         edges_df = pd.read_csv(csv_path)
+        
+        # Check if the weight column exists
+        has_weights = weight_column in edges_df.columns
+        if not has_weights:
+            warn(f"Weight column '{weight_column}' not found in {os.path.basename(csv_path)}. Using constant penalty for all edges in file.")
+
         for _, row in edges_df.iterrows():
             # Check whether the edge already has a penalty assigned
             edge = tuple(sorted((int(row["u"]), int(row["v"]))))
+            
+            # Determine the penalty for this edge
+            if has_weights:
+                edge_weight = row[weight_column] * penalty
+            else:
+                edge_weight = penalty
+
             if edge in self._edge_penalties:
                 # Add the penalty to the existing penalty
-                self._edge_penalties[edge] += penalty
+                self._edge_penalties[edge] += edge_weight
             else:
                 # Assign the penalty to the edge
-                self._edge_penalties[edge] = penalty
+                self._edge_penalties[edge] = edge_weight
 
         self._edge_penalty_params[csv_path] = penalty
 
-        print(f"Penalizing edges from {os.path.basename(csv_path)} with weight {penalty}")
+        print(f"Penalizing edges from {os.path.basename(csv_path)} with factor {penalty}")
 
         return self
 
@@ -714,7 +729,7 @@ class EnsembleRunner:
 
         # Create the table 
         self._updaters[f"{name}_table"] = lambda p: utmetrics.tabulate_partisan_data(p, elections, parties)
-        print(f"  Added partisan data tabulator: '{f"{name}_table"}'")
+        print(f"  Added partisan data tabulator: '{name}_table'")
 
         if ignore_table_output:
             self.ignore_output(f"{name}_table")
@@ -1403,7 +1418,8 @@ class EnsembleRunner:
             save_dir = os.path.join(output_dir, name)
             os.makedirs(save_dir, exist_ok=True)
 
-        print(f"=== MCMC {name if name else '\b'} ===")
+        label = name if name else ""
+        print(f"=== MCMC {label} ===")
 
         if use_preconditioned_partition:
             if not self.preconditioned_partition:
