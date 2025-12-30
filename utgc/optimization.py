@@ -1,5 +1,7 @@
-from typing import List, Dict, Literal, Union, Callable, Optional
+from typing import List, Dict, Literal, Union, Callable, Optional, Tuple, Sequence
 import random
+from dataclasses import dataclass
+import data
 
 from gerrychain.chain import MarkovChain
 from gerrychain.partition import Partition
@@ -44,11 +46,20 @@ class OptimizationMetric:
         """
         if self.acceptance_threshold is None:
             return True
-        else:
+        
+        # Determine direction of inequality based on optimization goal
+        if self.maximize:
+            # Maximizing: must be greater than threshold
             if self.is_inclusive:
                 return s >= self.acceptance_threshold
             else:
                 return s > self.acceptance_threshold
+        else:
+            # Minimizing: must be less than threshold
+            if self.is_inclusive:
+                return s <= self.acceptance_threshold
+            else:
+                return s < self.acceptance_threshold
 
     def within_optimal_bound(self, s: float) -> bool:
         """
@@ -97,19 +108,32 @@ class LexicographicOptimizer:
         return self._best_part
 
     @property
-    def best_lex_score(self) -> Tuple[float]:
+    def best_lex_score(self) -> Tuple[float, ...]:
         return self._best_lex_score
 
-    def lex_score(self, part: Partition) -> Tuple[float]:
+    def lex_score(self, part: Partition) -> Tuple[float, ...]:
         return tuple([metric.score(part) for metric in self._metrics])
 
-    def lex_geq(self, score1: Tuple[float], score2: Tuple[float]) -> bool:
+    def lex_geq(self, score1: Tuple[float, ...], score2: Tuple[float, ...], depth: Optional[int] = None) -> bool:
         """
-        Evaluates whether score1 is at least as preferred as score2, analagous to >= for sets of lexicographic preferences.
+        Evaluates whether score1 is at least as preferred as score2 lexicographically.
+        
+        If depth is provided, only the first `depth` metrics are considered.
         """
-        for s1, s2, m in zip(score1, score2, self._metrics):
-            if not (m.is_equivalent(s1, s2) or m.is_preferred(s1, s2)):
-                return False
+        metrics_to_check = self._metrics if depth is None else self._metrics[:depth]
+        
+        for i, m in enumerate(metrics_to_check):
+            s1 = score1[i]
+            s2 = score2[i]
+            
+            # If they are equivalent, continue to next metric
+            if m.is_equivalent(s1, s2):
+                continue
+            
+            # If not equivalent, checks if s1 is strictly preferred
+            return m.is_preferred(s1, s2)
+            
+        # If we went through all metrics and they were all equivalent
         return True
 
     def sequential_short_bursts(
@@ -118,11 +142,13 @@ class LexicographicOptimizer:
         num_bursts: Union[int, List[int]],
     ):
         """
-        Optimizes the metrics sequentially.
+        Optimizes the metrics sequentially, as defined in [1].
         
         First, an optimization pass over metric[0] is performed. Then metric[1] is optimized, under the constraint that metric[0] maintains its optimal value. This process is repeated for metric[2], etc.
         
         The number of bursts and burst lengths are specified by the user. If a single integer is provided, it is used for all metrics. If a list is provided, it is used for the corresponding step in the sequence, and should have the same number of entries as the number of metrics.
+        
+        [1] https://en.wikipedia.org/wiki/Lexicographic_optimization#Sequential_algorithm_for_general_objectives
         """
         self._best_part = self._initial_part
         self._best_lex_score = self.lex_score(self._best_part)
@@ -135,10 +161,16 @@ class LexicographicOptimizer:
         if len(burst_lengths) != len(num_bursts) or len(burst_lengths) != len(self._metrics):
             raise ValueError("burst_lengths, num_bursts, and LexicographicOptimizer metrics must have the same length")
         
-        # For each metric, perform an optimization run
-        for bursts, length, metric in zip(
+        # For each metric phase i, perform an optimization run considering metrics 0..i
+        for i, (bursts, length, metric) in enumerate(zip(
             num_bursts, burst_lengths, self._metrics
-        ):
+        )):
+            # Depth for comparison: we care about metrics 0 to i
+            comparison_depth = i + 1
+            
+            # Flag to stop bursts if we hit optimization bound
+            metric_optimized = False
+
             # For each burst, perform a short burst
             for _ in range(bursts):
                 chain = MarkovChain(
@@ -153,9 +185,17 @@ class LexicographicOptimizer:
                     yield part
                     part_score = self.lex_score(part)
 
-                    if self.lex_geq(part_score, self._best_lex_score):
+                    # Update best part if new one is lexicographically better or equal (up to current depth)
+                    if self.lex_geq(part_score, self._best_lex_score, depth=comparison_depth):
                         self._best_part = part
                         self._best_lex_score = part_score
                     
-                        if metric.within_optimal_bound(metric.score(part)):
+                        # Check bounded condition for the *current* target metric
+                        # We use the score from the tuple to avoid re-calculating
+                        current_metric_score = part_score[i]
+                        if metric.within_optimal_bound(current_metric_score):
+                            metric_optimized = True
                             break
+                
+                if metric_optimized:
+                    break
