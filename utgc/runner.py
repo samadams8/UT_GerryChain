@@ -5,6 +5,7 @@ import pandas as pd
 import geopandas as gpd
 from functools import partial
 import random
+import math 
 from typing import Optional, Dict, Any, List, Callable, Tuple, Literal
 import yaml
 from math import ceil
@@ -12,8 +13,9 @@ import json
 from datetime import datetime
 import networkx as nx
 
-from gerrychain import Graph, GeographicPartition, MarkovChain, Partition, updaters, accept, optimization
-from gerrychain.proposals import recom
+from gerrychain import Graph, GeographicPartition, MarkovChain, Partition, updaters, accept
+from gerrychain.optimization import SingleMetricOptimizer
+from gerrychain.proposals import recom, propose_random_flip
 from gerrychain.tree import bipartition_tree
 from gerrychain.constraints import contiguous, UpperBound
 from gerrychain.metrics import polsby_popper
@@ -1232,7 +1234,7 @@ class EnsembleRunner:
             if "not_equal_constraint" in self._constraint_params and self._constraint_params["not_equal_constraint"] is True:
                 constraints.append(rutil.NotEqual())
 
-            optimizer = optimization.SingleMetricOptimizer(
+            optimizer = SingleMetricOptimizer(
                 proposal=proposal,
                 constraints=constraints,
                 initial_state=initial_partition,
@@ -1358,7 +1360,7 @@ class EnsembleRunner:
             # Create optimization metric from updater name
             optimization_metric = self._create_optimization_metric(updater_name)
 
-            optimizer = optimization.SingleMetricOptimizer(
+            optimizer = SingleMetricOptimizer(
                 proposal=proposal,
                 constraints=self._constraints,
                 initial_state=initial_partition,
@@ -1382,7 +1384,7 @@ class EnsembleRunner:
             # Create optimization metric from updater name
             optimization_metric = self._create_optimization_metric(updater_name)
 
-            optimizer = optimization.SingleMetricOptimizer(
+            optimizer = SingleMetricOptimizer(
                 proposal=proposal,
                 constraints=self._constraints,
                 initial_state=initial_partition,
@@ -1405,12 +1407,126 @@ class EnsembleRunner:
 
         return partition_iterator
 
+    def _polish_partition(self, partition: Partition, steps: int = 10000) -> Partition:
+        """
+        Refine a partition to achieve strict population balance using single-node flips.
+        
+        Parameters
+        ----------
+        partition : Partition
+            The partition to polish
+        steps : int
+            Maximum number of flips to attempt
+            
+        Returns
+        -------
+        Partition
+            The polished partition
+        """
+        # Create a mutable working partition
+        current_partition = partition
+        ideal_pop = self._population_params["ideal_pop"]
+        pop_col = self._population_params["column_id"]
+        
+        def _get_sse(part):
+            sse = 0
+            for pop in part["population"].values():
+                sse += (pop - ideal_pop) ** 2
+            return sse
+
+        def _is_balanced(part):
+            for pop in part["population"].values():
+                if abs(pop - ideal_pop) >= 1.0:
+                    return False
+            return True
+
+        if _is_balanced(current_partition):
+            return current_partition
+
+        # Filter constraints
+        if _is_balanced(current_partition):
+            return current_partition
+
+        # Filter constraints
+        active_constraints = [c for c in self._constraints if not isinstance(c, rutil.NotEqual)]
+
+        try:
+            print(f"    Polishing partition (max {steps} steps) with Simulated Annealing...")
+            
+            # Define beta schedule for annealing using GerryChain's native factory
+            # Creates a schedule (0 -> 1) over 'steps' iterations
+            beta_schedule = SingleMetricOptimizer.linearcycle_beta_function(
+                duration_hot=0,
+                duration_cooldown=steps,
+                duration_cold=0
+            )
+
+            # Define SSE metric wrapper for optimizer
+            # Use log(SSE) to avoid OverflowError in exponentiation during improvements
+            def get_sse_metric(part):
+                sse = _get_sse(part)
+                if sse <= 0:
+                    return -1.0 # Return small value for perfect balance
+                return math.log(sse)
+
+            # Instantiate SingleMetricOptimizer
+            # maximize=False because we want to minimize SSE
+            optimizer = SingleMetricOptimizer(
+                proposal=propose_random_flip,
+                constraints=active_constraints,
+                initial_state=current_partition,
+                optimization_metric=get_sse_metric,
+                maximize=False
+            )
+
+            # Run Simulated Annealing
+            # consume the generator efficiently
+            from collections import deque
+            deque(
+                optimizer.simulated_annealing(
+                    num_steps=steps,
+                    beta_function=beta_schedule,
+                    beta_magnitude=100.0, # Scale beta range to [0, 100.0] to account for small LogSSE deltas
+                    with_progress_bar=False
+                ),
+                maxlen=0
+            )
+
+            current_partition = optimizer.best_part
+            
+            # Check balance of best result
+            if _is_balanced(current_partition):
+                print(f"      [Debug] Perfect balance achieved during polishing (Best LogSSE: {optimizer.best_score:.2f})")
+            else:
+                print(f"      [Debug] Polishing finished. Best LogSSE: {optimizer.best_score:.2f}")
+
+        except Exception as e:
+            warn(f"Polishing failed with error: {e}")
+            import traceback
+            traceback.print_exc()
+            # If polishing fails, return the original partition
+            current_partition = partition
+        
+        final_sse = _get_sse(current_partition)
+        print(f"    Polishing complete. SSE: {_get_sse(partition):.2f} -> {final_sse:.2f}")
+        
+        # Final check logic
+        if not _is_balanced(current_partition):
+             pops = current_partition["population"].values()
+             # Calculating max deviation for reporting
+             max_dev = max(abs(p - ideal_pop) for p in pops)
+             warn(f"Polishing finished but perfect balance not reached. Max deviation: {float(max_dev):.4f}")
+
+        return current_partition
+
     # --- Run Execution ---
     def run(self,
         name: Optional[str] = None,
         num_steps: int = 5000,
         output_dir: Optional[str] = None,
         use_preconditioned_partition: bool = True,
+        polish: bool = False,
+        polish_steps: int = 10000,
     ):
         if name is None:
             save_dir = output_dir
@@ -1456,6 +1572,8 @@ class EnsembleRunner:
                 "num_steps": num_steps,
                 "use_preconditioned_partition": use_preconditioned_partition,
                 "preconditioning": self._precondition_params,
+                "polish": polish,
+                "polish_steps": polish_steps,
             },
             "construction": self._construction_history,
         }
@@ -1465,37 +1583,65 @@ class EnsembleRunner:
         
         # Set results path and open file for writing
         output_file = os.path.join(save_dir, "output.jsonl")
-        output_file_handle = open(output_file, "w")
         print("Running Markov chain...")
-        for iter, partition in enumerate(partition_iterator):
-            # Use (iter + 1) so that step numbers correspond to how many
-            # iterations have been completed at the time of the callback
-            step_number = iter + 1
+        
+        with open(output_file, "w") as output_file_handle:
+            for iter, partition in enumerate(partition_iterator):
+                # Use (iter + 1) so that step numbers correspond to how many
+                # iterations have been completed at the time of the callback
+                step_number = iter + 1
 
-            # Collect updater data from this step
-            data = {'step': step_number}
-            for updater_name in self._updaters.keys():
-                if updater_name in self._ignored_updaters:
-                    continue
+                # Polishing: Create side-branch if enabled
+                if polish:
+                    # Identify split updaters
+                    split_keys = sorted([k for k in self._updaters if "split" in k])
+                    
+                    def _get_split_vals(p):
+                        vals = []
+                        for k in split_keys:
+                            try:
+                                vals.append(str(p[k]))
+                            except Exception:
+                                vals.append("?")
+                        return vals
 
-                value = partition[updater_name]
-                if isinstance(value, dict):
-                    # Sort the dictionary by key
-                    data[updater_name] = {
-                        str(k): v for k, v in sorted(value.items())
-                    }
+                    # Capture before
+                    vals_before = _get_split_vals(partition)
+                    
+                    output_partition = self._polish_partition(partition, steps=polish_steps)
+                    
+                    # Capture after
+                    vals_after = _get_split_vals(output_partition)
+                    
+                    if split_keys:
+                         print(f"      [Debug] Splits: ({', '.join(vals_before)}) -> ({', '.join(vals_after)})")
                 else:
-                    data[updater_name] = value
-            output_file_handle.write(json.dumps(data) + "\n")
-            output_file_handle.flush()
+                    output_partition = partition
 
-            # Run callbacks
-            for _, value in self._callbacks.items():
-                if step_number % value['frequency'] == 0:
-                    value['action'](partition, step_number, save_dir)
-            
-            # Clear parent partition to save memory
-            partition.parent = None
+                # Collect updater data from this step (using output_partition)
+                data = {'step': step_number}
+                for updater_name in self._updaters.keys():
+                    if updater_name in self._ignored_updaters:
+                        continue
+
+                    value = output_partition[updater_name]
+                    if isinstance(value, dict):
+                        # Sort the dictionary by key
+                        data[updater_name] = {
+                            str(k): v for k, v in sorted(value.items())
+                        }
+                    else:
+                        data[updater_name] = value
+                output_file_handle.write(json.dumps(data) + "\n")
+                output_file_handle.flush()
+
+                # Run callbacks (using output_partition)
+                for _, value in self._callbacks.items():
+                    if step_number % value['frequency'] == 0:
+                        value['action'](output_partition, step_number, save_dir)
+                
+                # Clear parent partition to save memory
+                partition.parent = None
         
         output_file_handle.close()
 
