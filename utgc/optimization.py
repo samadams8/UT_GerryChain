@@ -140,6 +140,7 @@ class LexicographicOptimizer:
         self,
         burst_lengths: Union[int, List[int]],
         num_bursts: Union[int, List[int]],
+        preoptimization_limit: int = 0,
     ):
         """
         Optimizes the metrics sequentially, as defined in [1].
@@ -167,7 +168,37 @@ class LexicographicOptimizer:
         )):
             # Depth for comparison: we care about metrics 0 to i
             comparison_depth = i + 1
+
+            ### Pre-Optimization Phase (optional) ###
+            if preoptimization_limit > 0 and metric.acceptance_threshold is not None:
+                current_score = self._best_lex_score
+                if not metric.is_acceptable(current_score[i]):
+                    
+                    chain = MarkovChain(
+                        proposal=self._proposal,
+                        constraints=self._constraints,
+                        accept=always_accept,
+                        initial_state=self._best_part,
+                        total_steps=preoptimization_limit,
+                    )
+                    
+                    satisfied = False
+                    for part in chain:
+                        yield part
+                        part_score = self.lex_score(part)
+                        
+                        # We still use normal lexicographic improvement.
+                        # Since previous metrics are higher priority, we won't sacrifice them to satisfy this one.
+                        if self.lex_geq(part_score, self._best_lex_score, depth=comparison_depth):
+                            self._best_part = part
+                            self._best_lex_score = part_score
+                            
+                            if metric.is_acceptable(part_score[i]):
+                                satisfied = True
+                                break
             
+            ### Optimization Phase ###
+
             # Flag to stop bursts if we hit optimization bound
             metric_optimized = False
 
