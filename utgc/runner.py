@@ -6,9 +6,9 @@ import geopandas as gpd
 from functools import partial
 import random
 import math 
-from typing import Optional, Dict, Any, List, Callable, Tuple, Literal
+from typing import Optional, Dict, Any, List, Callable, Tuple, Literal, Union
 import yaml
-from math import ceil
+from math import ceil, mean
 import json
 from datetime import datetime
 import networkx as nx
@@ -24,6 +24,7 @@ import numpy as np
 
 import utgc.metrics as utmetrics
 from . import run_utils as rutil
+from .optimization import LexicographicOptimizer, OptimizationMetric
 
 # --- ENSEMBLE RUNNER ---
 class EnsembleRunner:
@@ -75,11 +76,16 @@ class EnsembleRunner:
 
         self._tilted_run_params = {}
         self._optimization_scheme_params = {}
-        # Updaters to ignore from the output file
+        # Updaters to ignore when generating the output file
         self._ignored_updaters = set()
 
         self._precondition_params = {}
         self.preconditioned_partition = None
+        
+        self._lex_metrics = []
+        self._lex_burst_lengths = []
+        self._lex_num_bursts = []
+        self._lex_preoptimization_limit = 0
 
         self._callbacks = {}
 
@@ -976,6 +982,118 @@ class EnsembleRunner:
 
         return self
     
+    def add_lexicographic_metric(self,
+        score_updater: str,
+        reduce: Optional[Literal["sum", "max", "min", "mean"]] = None,
+        maximize: bool = False,
+        optimal_bound: Optional[float] = None,
+        acceptance_threshold: Optional[float] = None,
+        is_inclusive: bool = False,
+        tolerance: float = 1e-6,
+        burst_length: int = 10,
+        num_bursts: int = 10,
+    ) -> 'EnsembleRunner':
+        """
+        Add a metric to the lexicographic optimization scheme. When adding multiple metrics, call this method multiple times, in priority order (highest priority first).
+
+        Parameters
+        ----------
+        score_updater : str
+            Name of the updater whose value should be optimized.
+        reduce : Optional[Literal["sum", "max", "min"]], optional
+            If the named updater has non-scalar outputs, indicate which reduction should be applied (optimizing over the min, max, or sum of the updater values). The default is None.
+        maximize : bool, optional
+            Whether to maximize the metric rather than minimize it. The default is False.
+        optimal_bound : Optional[float], optional
+            The optimal bound for the metric. If specified, the optimizer will save time by terminatig early if the metric is within this bound of optimality. The default is None.
+        acceptance_threshold : Optional[float], optional
+            The acceptance threshold for the metric. If specified and a preoptimization limit is specified, the optimizer will run an initial pass to try to drive the metric to lie within the acceptance threshold for the initial proposal of the optimization itself. The default is None.
+        is_inclusive : bool, optional
+            Whether the metric bounds are inclusive. The default is False.
+        tolerance : float, optional
+            Tolerance to be used in determining whether two values are 'equal'. If the difference between two values is less than this tolerance, they are considered equal. The default is 1e-6.
+        burst_length : int, optional
+            The burst length for optimizing over this metric. The default is 10.
+        num_bursts : int, optional
+            The number of bursts to use for optimizing over this metric. The default is 10.
+
+        Returns
+        -------
+        self
+        """
+        # Record the construction history
+        self._construction_history.append({
+            "method": "add_lexicographic_metric",
+            "kwargs": {
+                "score_updater": score_updater,
+                "reduce": reduce,
+                "maximize": maximize,
+                "optimal_bound": optimal_bound,
+                "acceptance_threshold": acceptance_threshold,
+                "is_inclusive": is_inclusive,
+                "tolerance": tolerance,
+                "burst_length": burst_length,
+                "num_bursts": num_bursts,
+            }
+        })
+
+        if score_updater not in self._updaters:
+            warn(f"Lexicographic metric optimization requires an updater '{score_updater}', but it was not found. Add updater '{score_updater}' to the runner before running.")
+
+        def reduce_fn(value, reduction):
+            if reduction is None:
+                return value
+            
+            # Convert value to a list
+            if isinstance(value, dict):
+                v = list(value.values())
+            elif isinstance(value, tuple):
+                v = list(value)
+            elif isinstance(value, np.ndarray):
+                v = value.tolist()
+            else:
+                v = value
+        
+            if reduction == "min":
+                return min(v)
+            elif reduction == "max":
+                return max(v)
+            elif reduction == "sum":
+                return sum(v)
+            elif reduction == "mean":
+                return mean(v)
+            else:
+                raise ValueError(f"Unknown reduction '{reduction}'.")
+
+        self._lex_metrics.append(
+            OptimizationMetric(
+                lambda p: reduce_fn(p[score_updater], reduce),
+                maximize,
+                optimal_bound,
+                acceptance_threshold,
+                is_inclusive,
+                tolerance
+            )
+        )
+        self._lex_burst_lengths.append(burst_length)
+        self._lex_num_bursts.append(num_bursts)
+
+        return self
+
+    def add_lexicographic_preoptimization(self,
+        limit: int = 1000
+    ) -> 'EnsembleRunner':
+        self._construction_history.append({
+            "method": "add_lexicographic_preoptimization",
+            "kwargs": {
+                "limit": limit,
+            }
+        })
+        
+        self._lex_preoptimization_limit = limit
+
+        return self
+
     # Callbacks
     def add_runtime_callback(self,
         name: str,
@@ -1407,117 +1525,37 @@ class EnsembleRunner:
 
         return partition_iterator
 
-    def _polish_partition(self, partition: Partition, steps: int = 10000) -> Partition:
+    def _lexicographic_optimize(self, partition: Partition) -> Partition:
         """
-        Refine a partition to achieve strict population balance using single-node flips.
-        
-        Parameters
-        ----------
-        partition : Partition
-            The partition to polish
-        steps : int
-            Maximum number of flips to attempt
-            
-        Returns
-        -------
-        Partition
-            The polished partition
+        Run the configured LexicographicOptimizer on the partition.
         """
-        # Create a mutable working partition
-        current_partition = partition
-        ideal_pop = self._population_params["ideal_pop"]
-        pop_col = self._population_params["column_id"]
-        
-        def _get_sse(part):
-            sse = 0
-            for pop in part["population"].values():
-                sse += (pop - ideal_pop) ** 2
-            return sse
-
-        def _is_balanced(part):
-            for pop in part["population"].values():
-                if abs(pop - ideal_pop) >= 1.0:
-                    return False
-            return True
-
-        if _is_balanced(current_partition):
-            return current_partition
-
-        # Filter constraints
-        if _is_balanced(current_partition):
-            return current_partition
+        if not self._lex_metrics:
+            warn("No valid metrics found for lexicographic optimization. Returning original partition.")
+            return partition
 
         # Filter constraints
         active_constraints = [c for c in self._constraints if not isinstance(c, rutil.NotEqual)]
-
-        try:
-            print(f"    Polishing partition (max {steps} steps) with Simulated Annealing...")
-            
-            # Define beta schedule for annealing using GerryChain's native factory
-            # Creates a schedule (0 -> 1) over 'steps' iterations
-            beta_schedule = SingleMetricOptimizer.linearcycle_beta_function(
-                duration_hot=0,
-                duration_cooldown=steps,
-                duration_cold=0
-            )
-
-            # Define SSE metric wrapper for optimizer
-            # Use log(SSE) to avoid OverflowError in exponentiation during improvements
-            def get_sse_metric(part):
-                sse = _get_sse(part)
-                if sse <= 0:
-                    return -1.0 # Return small value for perfect balance
-                return math.log(sse)
-
-            # Instantiate SingleMetricOptimizer
-            # maximize=False because we want to minimize SSE
-            optimizer = SingleMetricOptimizer(
-                proposal=propose_random_flip,
-                constraints=active_constraints,
-                initial_state=current_partition,
-                optimization_metric=get_sse_metric,
-                maximize=False
-            )
-
-            # Run Simulated Annealing
-            # consume the generator efficiently
-            from collections import deque
-            deque(
-                optimizer.simulated_annealing(
-                    num_steps=steps,
-                    beta_function=beta_schedule,
-                    beta_magnitude=100.0, # Scale beta range to [0, 100.0] to account for small LogSSE deltas
-                    with_progress_bar=False
-                ),
-                maxlen=0
-            )
-
-            current_partition = optimizer.best_part
-            
-            # Check balance of best result
-            if _is_balanced(current_partition):
-                print(f"      [Debug] Perfect balance achieved during polishing (Best LogSSE: {optimizer.best_score:.2f})")
-            else:
-                print(f"      [Debug] Polishing finished. Best LogSSE: {optimizer.best_score:.2f}")
-
-        except Exception as e:
-            warn(f"Polishing failed with error: {e}")
-            import traceback
-            traceback.print_exc()
-            # If polishing fails, return the original partition
-            current_partition = partition
         
-        final_sse = _get_sse(current_partition)
-        print(f"    Polishing complete. SSE: {_get_sse(partition):.2f} -> {final_sse:.2f}")
+        optimizer = LexicographicOptimizer(
+            proposal=self._proposal(partition), # Re-create proposal with current partition context if needed, though usually generic is fine
+            constraints=active_constraints,
+            initial_state=partition,
+            metrics=self._lex_metrics
+        )
         
-        # Final check logic
-        if not _is_balanced(current_partition):
-             pops = current_partition["population"].values()
-             # Calculating max deviation for reporting
-             max_dev = max(abs(p - ideal_pop) for p in pops)
-             warn(f"Polishing finished but perfect balance not reached. Max deviation: {float(max_dev):.4f}")
-
-        return current_partition
+        # Run sequential short bursts
+        # We need to consume the generator
+        from collections import deque
+        deque(
+            optimizer.sequential_short_bursts(
+                burst_lengths=self._lex_burst_lengths,
+                num_bursts=self._lex_num_bursts,
+                preoptimization_limit=self._lex_preoptimization_limit
+            ),
+            maxlen=0
+        )
+        
+        return optimizer.best_part
 
     # --- Run Execution ---
     def run(self,
@@ -1525,8 +1563,7 @@ class EnsembleRunner:
         num_steps: int = 5000,
         output_dir: Optional[str] = None,
         use_preconditioned_partition: bool = True,
-        polish: bool = False,
-        polish_steps: int = 10000,
+        lexicographic_polish: bool = False,
     ):
         if name is None:
             save_dir = output_dir
@@ -1574,6 +1611,8 @@ class EnsembleRunner:
                 "preconditioning": self._precondition_params,
                 "polish": polish,
                 "polish_steps": polish_steps,
+                "lexicographic_polish": lexicographic_polish,
+                "lexicographic_optimizer": self._lexicographic_optimizer_params,
             },
             "construction": self._construction_history,
         }
@@ -1615,6 +1654,10 @@ class EnsembleRunner:
                     
                     if split_keys:
                          print(f"      [Debug] Splits: ({', '.join(vals_before)}) -> ({', '.join(vals_after)})")
+                
+                elif lexicographic_polish:
+                    output_partition = self._lexicographic_optimize(partition)
+
                 else:
                     output_partition = partition
 
