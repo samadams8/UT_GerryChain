@@ -8,7 +8,8 @@ import random
 import math 
 from typing import Optional, Dict, Any, List, Callable, Tuple, Literal, Union
 import yaml
-from math import ceil, mean
+from math import ceil
+from statistics import mean
 import json
 from datetime import datetime
 import networkx as nx
@@ -229,6 +230,37 @@ class EnsembleRunner:
 
         self._population_params["pop_tolerance"] = tolerance
         print(f"Population deviation tolerance: {tolerance:%}")
+
+        return self
+
+    def add_pop_dev_updater(self, name: str = "pop_dev") -> 'EnsembleRunner':
+        """
+        Add an updater to track the population deviation of each district from the ideal population.
+        The deviation is calculated as (actual_pop - ideal_pop).
+
+        Parameters
+        ----------
+        name : str, optional
+            Name of the updater, by default "pop_dev"
+
+        Returns
+        -------
+        EnsembleRunner
+            Self
+        """
+        # Record the construction history
+        self._construction_history.append({
+            "method": "add_pop_dev_updater",
+            "kwargs": { "name": name }
+        })
+
+        ideal_pop = self._population_params["ideal_pop"]
+
+        # Use default argument to capture ideal_pop
+        self._updaters[name] = lambda p, target=ideal_pop: {
+            k: v - target for k, v in p["population"].items()
+        }
+        print(f"  Added population deviation updater: '{name}'")
 
         return self
 
@@ -1078,10 +1110,16 @@ class EnsembleRunner:
         self._lex_burst_lengths.append(burst_length)
         self._lex_num_bursts.append(num_bursts)
 
+        print(f"Added lexicographic optimization metric '{score_updater}'")
+        print(f"  Reduce to: {reduce}")
+        print(f"  Maximize: {maximize}")
+        print(f"  Burst length: {burst_length}")
+        print(f"  Number of bursts: {num_bursts}")
+
         return self
 
     def add_lexicographic_preoptimization(self,
-        limit: int = 1000
+        limit: int = 10000
     ) -> 'EnsembleRunner':
         self._construction_history.append({
             "method": "add_lexicographic_preoptimization",
@@ -1537,7 +1575,7 @@ class EnsembleRunner:
         active_constraints = [c for c in self._constraints if not isinstance(c, rutil.NotEqual)]
         
         optimizer = LexicographicOptimizer(
-            proposal=self._proposal(partition), # Re-create proposal with current partition context if needed, though usually generic is fine
+            proposal=propose_random_flip,
             constraints=active_constraints,
             initial_state=partition,
             metrics=self._lex_metrics
@@ -1609,10 +1647,13 @@ class EnsembleRunner:
                 "num_steps": num_steps,
                 "use_preconditioned_partition": use_preconditioned_partition,
                 "preconditioning": self._precondition_params,
-                "polish": polish,
-                "polish_steps": polish_steps,
                 "lexicographic_polish": lexicographic_polish,
-                "lexicographic_optimizer": self._lexicographic_optimizer_params,
+                "lexicographic_params": {
+                    "metrics": self._lex_metrics,
+                    "burst_lengths": self._lex_burst_lengths,
+                    "num_bursts": self._lex_num_bursts,
+                    "preoptimization_limit": self._lex_preoptimization_limit
+                }
             },
             "construction": self._construction_history,
         }
@@ -1631,31 +1672,31 @@ class EnsembleRunner:
                 step_number = iter + 1
 
                 # Polishing: Create side-branch if enabled
-                if polish:
-                    # Identify split updaters
-                    split_keys = sorted([k for k in self._updaters if "split" in k])
+                # if polish:
+                #     # Identify split updaters
+                #     split_keys = sorted([k for k in self._updaters if "split" in k])
                     
-                    def _get_split_vals(p):
-                        vals = []
-                        for k in split_keys:
-                            try:
-                                vals.append(str(p[k]))
-                            except Exception:
-                                vals.append("?")
-                        return vals
+                #     def _get_split_vals(p):
+                #         vals = []
+                #         for k in split_keys:
+                #             try:
+                #                 vals.append(str(p[k]))
+                #             except Exception:
+                #                 vals.append("?")
+                #         return vals
 
-                    # Capture before
-                    vals_before = _get_split_vals(partition)
+                #     # Capture before
+                #     vals_before = _get_split_vals(partition)
                     
-                    output_partition = self._polish_partition(partition, steps=polish_steps)
+                #     output_partition = self._polish_partition(partition, steps=polish_steps)
                     
-                    # Capture after
-                    vals_after = _get_split_vals(output_partition)
+                #     # Capture after
+                #     vals_after = _get_split_vals(output_partition)
                     
-                    if split_keys:
-                         print(f"      [Debug] Splits: ({', '.join(vals_before)}) -> ({', '.join(vals_after)})")
+                #     if split_keys:
+                #          print(f"      [Debug] Splits: ({', '.join(vals_before)}) -> ({', '.join(vals_after)})")
                 
-                elif lexicographic_polish:
+                if lexicographic_polish:
                     output_partition = self._lexicographic_optimize(partition)
 
                 else:

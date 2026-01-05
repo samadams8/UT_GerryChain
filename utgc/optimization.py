@@ -1,6 +1,7 @@
 from typing import List, Dict, Literal, Union, Callable, Optional, Tuple, Sequence
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+import yaml
 import data
 
 from gerrychain.chain import MarkovChain
@@ -73,6 +74,15 @@ class OptimizationMetric:
             else:
                 return s <= self.optimal_bound
 
+    @classmethod
+    def to_yaml(cls, representer, data):
+        dct = asdict(data)
+        if "score" in dct:
+            del dct["score"]
+        return representer.represent_mapping('tag:yaml.org,2002:map', dct)
+
+yaml.add_representer(OptimizationMetric, OptimizationMetric.to_yaml, Dumper=yaml.SafeDumper)
+
 class LexicographicOptimizer:
     """
     Class of algorithms that optimize partitions based on a lexicographic ordering of two or more metrics.
@@ -141,6 +151,7 @@ class LexicographicOptimizer:
         burst_lengths: Union[int, List[int]],
         num_bursts: Union[int, List[int]],
         preoptimization_limit: int = 0,
+        verbose: bool = False,
     ):
         """
         Optimizes the metrics sequentially, as defined in [1].
@@ -161,7 +172,7 @@ class LexicographicOptimizer:
 
         if len(burst_lengths) != len(num_bursts) or len(burst_lengths) != len(self._metrics):
             raise ValueError("burst_lengths, num_bursts, and LexicographicOptimizer metrics must have the same length")
-        
+
         # For each metric phase i, perform an optimization run considering metrics 0..i
         for i, (bursts, length, metric) in enumerate(zip(
             num_bursts, burst_lengths, self._metrics
@@ -171,6 +182,8 @@ class LexicographicOptimizer:
 
             ### Pre-Optimization Phase (optional) ###
             if preoptimization_limit > 0 and metric.acceptance_threshold is not None:
+                if verbose:
+                    print(f"Pre-optimizing metric {i} with acceptance threshold {metric.acceptance_threshold}")
                 current_score = self._best_lex_score
                 if not metric.is_acceptable(current_score[i]):
                     
@@ -203,6 +216,8 @@ class LexicographicOptimizer:
             metric_optimized = False
 
             # For each burst, perform a short burst
+            if verbose:
+                print(f"Optimizing metric {i}")
             for _ in range(bursts):
                 chain = MarkovChain(
                     proposal=self._proposal,
