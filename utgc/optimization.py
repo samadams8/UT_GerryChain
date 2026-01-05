@@ -2,6 +2,7 @@ from typing import List, Dict, Literal, Union, Callable, Optional, Tuple, Sequen
 import random
 from dataclasses import dataclass, asdict
 import yaml
+from tqdm.auto import tqdm
 import data
 
 from gerrychain.chain import MarkovChain
@@ -174,16 +175,21 @@ class LexicographicOptimizer:
             raise ValueError("burst_lengths, num_bursts, and LexicographicOptimizer metrics must have the same length")
 
         # For each metric phase i, perform an optimization run considering metrics 0..i
-        for i, (bursts, length, metric) in enumerate(zip(
-            num_bursts, burst_lengths, self._metrics
-        )):
+        metric_iter = zip(num_bursts, burst_lengths, self._metrics)
+        if verbose:
+            metric_iter = tqdm(metric_iter, total=len(self._metrics), desc="Lexicographic Optimization")
+
+        for i, (bursts, length, metric) in enumerate(metric_iter):
             # Depth for comparison: we care about metrics 0 to i
             comparison_depth = i + 1
 
             ### Pre-Optimization Phase (optional) ###
             if preoptimization_limit > 0 and metric.acceptance_threshold is not None:
                 if verbose:
-                    print(f"Pre-optimizing metric {i} with acceptance threshold {metric.acceptance_threshold}")
+                    # Clear previous line or log if needed, but tqdm handles it mostly.
+                    # Use tqdm.write if we really want to keep the log
+                    pass 
+
                 current_score = self._best_lex_score
                 if not metric.is_acceptable(current_score[i]):
                     
@@ -195,7 +201,9 @@ class LexicographicOptimizer:
                         total_steps=preoptimization_limit,
                     )
                     
-                    satisfied = False
+                    if verbose:
+                        chain = tqdm(chain, total=preoptimization_limit, desc=f"Pre-optimizing metric {i}", leave=False)
+
                     for part in chain:
                         yield part
                         part_score = self.lex_score(part)
@@ -207,7 +215,6 @@ class LexicographicOptimizer:
                             self._best_lex_score = part_score
                             
                             if metric.is_acceptable(part_score[i]):
-                                satisfied = True
                                 break
             
             ### Optimization Phase ###
@@ -216,8 +223,10 @@ class LexicographicOptimizer:
             metric_optimized = False
 
             # For each burst, perform a short burst
+            pbar = None
             if verbose:
-                print(f"Optimizing metric {i}")
+                pbar = tqdm(total=bursts * length, desc=f"Optimizing metric {i}", leave=False)
+
             for _ in range(bursts):
                 chain = MarkovChain(
                     proposal=self._proposal,
@@ -229,6 +238,9 @@ class LexicographicOptimizer:
 
                 for part in chain:
                     yield part
+                    if pbar:
+                        pbar.update(1)
+
                     part_score = self.lex_score(part)
 
                     # Update best part if new one is lexicographically better or equal (up to current depth)
@@ -245,3 +257,6 @@ class LexicographicOptimizer:
                 
                 if metric_optimized:
                     break
+            
+            if pbar:
+                pbar.close()

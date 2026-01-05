@@ -233,7 +233,7 @@ class EnsembleRunner:
 
         return self
 
-    def add_pop_dev_updater(self, name: str = "pop_dev") -> 'EnsembleRunner':
+    def add_pop_dev_updater(self, name: str = "pop_dev", ignore_output: bool = True) -> 'EnsembleRunner':
         """
         Add an updater to track the population deviation of each district from the ideal population.
         The deviation is calculated as (actual_pop - ideal_pop).
@@ -242,6 +242,8 @@ class EnsembleRunner:
         ----------
         name : str, optional
             Name of the updater, by default "pop_dev"
+        ignore_output : bool, optional
+            Whether to ignore the output of the updater, by default True
 
         Returns
         -------
@@ -251,16 +253,18 @@ class EnsembleRunner:
         # Record the construction history
         self._construction_history.append({
             "method": "add_pop_dev_updater",
-            "kwargs": { "name": name }
+            "kwargs": { "name": name, "ignore_output": ignore_output }
         })
 
         ideal_pop = self._population_params["ideal_pop"]
 
-        # Use default argument to capture ideal_pop
         self._updaters[name] = lambda p, target=ideal_pop: {
             k: v - target for k, v in p["population"].items()
         }
         print(f"  Added population deviation updater: '{name}'")
+
+        if ignore_output: 
+            self.ignore_output(name)
 
         return self
 
@@ -1016,7 +1020,7 @@ class EnsembleRunner:
     
     def add_lexicographic_metric(self,
         score_updater: str,
-        reduce: Optional[Literal["sum", "max", "min", "mean"]] = None,
+        reduce: Optional[Literal["sum", "max", "min", "mean", "L1", "L2"]] = None,
         maximize: bool = False,
         optimal_bound: Optional[float] = None,
         acceptance_threshold: Optional[float] = None,
@@ -1032,8 +1036,16 @@ class EnsembleRunner:
         ----------
         score_updater : str
             Name of the updater whose value should be optimized.
-        reduce : Optional[Literal["sum", "max", "min"]], optional
-            If the named updater has non-scalar outputs, indicate which reduction should be applied (optimizing over the min, max, or sum of the updater values). The default is None.
+        reduce : {"sum", "max", "min", "mean", "L1", "L2", "absmax", "absmin"}, optional
+            If the named updater has non-scalar outputs, indicate which reduction should be applied. The default is None. Options are:
+            - "sum": sum of the updater values
+            - "max": maximum of the updater values
+            - "min": minimum of the updater values
+            - "mean": mean of the updater values
+            - "L1": L1 norm of the updater values
+            - "L2": L2 norm of the updater values
+            - "absmax": maximum of the absolute values of the updater values
+            - "absmin": minimum of the absolute values of the updater values
         maximize : bool, optional
             Whether to maximize the metric rather than minimize it. The default is False.
         optimal_bound : Optional[float], optional
@@ -1090,10 +1102,18 @@ class EnsembleRunner:
                 return min(v)
             elif reduction == "max":
                 return max(v)
+            elif reduction == "absmax":
+                return max([abs(t) for t in v])
+            elif reduction == "absmin":
+                return min([abs(t) for t in v])
             elif reduction == "sum":
                 return sum(v)
             elif reduction == "mean":
                 return mean(v)
+            elif reduction == "L1":
+                return sum(abs(v))
+            elif reduction == "L2":
+                return sum([t**2 for t in v])**0.5
             else:
                 raise ValueError(f"Unknown reduction '{reduction}'.")
 
@@ -1588,7 +1608,8 @@ class EnsembleRunner:
             optimizer.sequential_short_bursts(
                 burst_lengths=self._lex_burst_lengths,
                 num_bursts=self._lex_num_bursts,
-                preoptimization_limit=self._lex_preoptimization_limit
+                preoptimization_limit=self._lex_preoptimization_limit,
+                verbose=True
             ),
             maxlen=0
         )
