@@ -1,4 +1,4 @@
-from typing import List, Dict, Literal, Union, Callable, Optional, Tuple, Sequence
+from typing import List, Dict, Literal, Union, Callable, Optional, Tuple, Sequence, Any
 import random
 from dataclasses import dataclass, asdict
 import yaml
@@ -8,6 +8,7 @@ import data
 from gerrychain.chain import MarkovChain
 from gerrychain.partition import Partition
 from gerrychain.accept import always_accept
+from gerrychain.optimization import SingleMetricOptimizer
 
 @dataclass
 class OptimizationMetric:
@@ -15,11 +16,11 @@ class OptimizationMetric:
     score: Callable[[Partition], float]
     # Whether to maximize or minimize the score
     maximize: bool = False
-    # If the score is known to be bounded, optimal_bound allows the optimizer to stop searching along that axis once it reaches the bound
-    optimal_bound: Optional[float] = None
+    # If the score is known to be bounded, early_stopping_bound allows the optimizer to stop searching along that axis once it reaches the bound
+    early_stopping_bound: Optional[float] = None
     # Threshold above/below which the solution should not be accepted
     acceptance_threshold: Optional[float] = None
-    # Whether the acceptance threshold is inclusive or exclusive
+    # Whether the early termination and acceptance thresholds are inclusive or exclusive
     is_inclusive: bool = False 
     # Amount of difference permitted between two scores before they are considered different
     tolerance: Optional[float] = None 
@@ -52,28 +53,36 @@ class OptimizationMetric:
         # Determine direction of inequality based on optimization goal
         if self.maximize:
             # Maximizing: must be greater than threshold
-            if self.is_inclusive:
-                return s >= self.acceptance_threshold
-            else:
-                return s > self.acceptance_threshold
+            return (
+                s > self.acceptance_threshold
+                or (self.is_inclusive and self.is_equivalent(s, self.acceptance_threshold))
+            )
         else:
             # Minimizing: must be less than threshold
-            if self.is_inclusive:
-                return s <= self.acceptance_threshold
-            else:
-                return s < self.acceptance_threshold
+            return (
+                s < self.acceptance_threshold
+                or (self.is_inclusive and self.is_equivalent(s, self.acceptance_threshold))
+            )
 
-    def within_optimal_bound(self, s: float) -> bool:
+    def within_early_stopping_bound(self, s: float) -> bool:
         """
-        Returns True if the score s is within the optimal bound, False otherwise.
+        Returns True if the score s is within the early stopping bound, False otherwise.
         """
-        if self.optimal_bound is None:
+        if self.early_stopping_bound is None:
             return False
+        
+        if self.maximize:
+            return (
+                s > self.early_stopping_bound
+                or ( self.is_inclusive
+                and self.is_equivalent(s, self.early_stopping_bound) )
+            )
         else:
-            if self.maximize:
-                return s >= self.optimal_bound
-            else:
-                return s <= self.optimal_bound
+            return (
+                s < self.early_stopping_bound
+                or ( self.is_inclusive
+                and self.is_equivalent(s, self.early_stopping_bound) )
+            )
 
     @classmethod
     def to_yaml(cls, representer, data):
@@ -90,7 +99,6 @@ class LexicographicOptimizer:
     """
     def __init__(
         self,
-        proposal: Callable[[Partition], Partition],
         constraints: Union[
             Callable[[Partition], bool],
             List[Callable[[Partition], bool]],
@@ -100,7 +108,6 @@ class LexicographicOptimizer:
         step_indexer: str = "step",
     ):
         self._initial_part = initial_state
-        self._proposal = proposal
         self._constraints = constraints
         self._metrics = metrics
         self._step_indexer = step_indexer
@@ -147,116 +154,92 @@ class LexicographicOptimizer:
         # If we went through all metrics and they were all equivalent
         return True
 
-    def sequential_short_bursts(
+    def optimize(
         self,
-        burst_lengths: Union[int, List[int]],
-        num_bursts: Union[int, List[int]],
+        proposals: Sequence[Callable[[Partition], Partition]],
+        optimizer_configs: Sequence[Dict[str, Any]],
         preoptimization_limit: int = 0,
         verbose: bool = False,
     ):
         """
-        Optimizes the metrics sequentially, as defined in [1].
+        Optimizes the metrics sequentially (as described in [1]) using specified GerryChain optimizers.
         
         First, an optimization pass over metric[0] is performed. Then metric[1] is optimized, under the constraint that metric[0] maintains its optimal value. This process is repeated for metric[2], etc.
         
-        The number of bursts and burst lengths are specified by the user. If a single integer is provided, it is used for all metrics. If a list is provided, it is used for the corresponding step in the sequence, and should have the same number of entries as the number of metrics.
-        
         [1] https://en.wikipedia.org/wiki/Lexicographic_optimization#Sequential_algorithm_for_general_objectives
+        
+        :param proposals: A list of proposal functions to use for each phase of optimization.
+        :param optimizer_configs: A list of dictionaries, where each dictionary configures the optimizer for the corresponding metric. Each dict must have a "method" key (e.g., "short_bursts", "simulated_annealing") and other keys as arguments.
+        :param preoptimization_limit: Number of steps to pre-optimize if a metric is not acceptable.
+        :param verbose: Whether to print progress.
         """
         self._best_part = self._initial_part
         self._best_lex_score = self.lex_score(self._best_part)
 
-        if isinstance(burst_lengths, int):
-            burst_lengths = [burst_lengths] * len(self._metrics)
-        if isinstance(num_bursts, int):
-            num_bursts = [num_bursts] * len(self._metrics)
+        if len(optimizer_configs) != len(self._metrics):
+            raise ValueError("optimizer_configs and metrics must have the same length")
 
-        if len(burst_lengths) != len(num_bursts) or len(burst_lengths) != len(self._metrics):
-            raise ValueError("burst_lengths, num_bursts, and LexicographicOptimizer metrics must have the same length")
-
-        # For each metric phase i, perform an optimization run considering metrics 0..i
-        metric_iter = zip(num_bursts, burst_lengths, self._metrics)
+        metric_iter = zip(optimizer_configs, self._metrics)
         if verbose:
             metric_iter = tqdm(metric_iter, total=len(self._metrics), desc="Lexicographic Optimization")
 
-        for i, (bursts, length, metric) in enumerate(metric_iter):
-            # Depth for comparison: we care about metrics 0 to i
+        for i, (config, metric) in enumerate(metric_iter):
             comparison_depth = i + 1
+            
+            def make_lex_constraint(depth, best_score):
+                def constraint(partition):
+                    score = self.lex_score(partition)
+                    if depth == 0:
+                        return True
+                    return self.lex_geq(score, best_score, depth=depth)
+                return constraint
+            
+            baseline_score = self._best_lex_score
+            phase_constraint = make_lex_constraint(i, baseline_score)
+            
+            constraints = self._constraints
+            if isinstance(constraints, list):
+                constraints = constraints + [phase_constraint]
+            else:
+                constraints = [constraints, phase_constraint]
+            
+            smo = SingleMetricOptimizer(
+                proposal=proposals[i],
+                constraints=constraints,
+                initial_state=self._best_part,
+                optimization_metric=metric.score,
+                maximize=metric.maximize
+            )
+            
+            # Call the requested method
+            method_name = config.get("method", "short_bursts")
+            kwargs = {k: v for k, v in config.items() if k != "method"}
+            
+            # Optimization methods in SingleMetricOptimizer (short_bursts, simulated_annealing, etc.) return a generator
+            if not hasattr(smo, method_name):
+                 raise ValueError(f"Unknown optimization method: {method_name}")
+            
+            optimizer_method = getattr(smo, method_name)
+            
+            # Run the optimizer
+            # We wrap in tqdm if verbose specific to this burst
+            iterator = optimizer_method(**kwargs)
 
-            ### Pre-Optimization Phase (optional) ###
-            if preoptimization_limit > 0 and metric.acceptance_threshold is not None:
+            for part in iterator:
+                # Check if this partition improves the GLOBAL lexicographic score up to current depth
+                part_score = self.lex_score(part)
+
                 if verbose:
-                    # Clear previous line or log if needed, but tqdm handles it mostly.
-                    # Use tqdm.write if we really want to keep the log
-                    pass 
-
-                current_score = self._best_lex_score
-                if not metric.is_acceptable(current_score[i]):
-                    
-                    chain = MarkovChain(
-                        proposal=self._proposal,
-                        constraints=self._constraints,
-                        accept=always_accept,
-                        initial_state=self._best_part,
-                        total_steps=preoptimization_limit,
-                    )
-                    
-                    if verbose:
-                        chain = tqdm(chain, total=preoptimization_limit, desc=f"Pre-optimizing metric {i}", leave=False)
-
-                    for part in chain:
-                        yield part
-                        part_score = self.lex_score(part)
-                        
-                        # We still use normal lexicographic improvement.
-                        # Since previous metrics are higher priority, we won't sacrifice them to satisfy this one.
-                        if self.lex_geq(part_score, self._best_lex_score, depth=comparison_depth):
-                            self._best_part = part
-                            self._best_lex_score = part_score
-                            
-                            if metric.is_acceptable(part_score[i]):
-                                break
-            
-            ### Optimization Phase ###
-
-            # Flag to stop bursts if we hit optimization bound
-            metric_optimized = False
-
-            # For each burst, perform a short burst
-            pbar = None
-            if verbose:
-                pbar = tqdm(total=bursts * length, desc=f"Optimizing metric {i}", leave=False)
-
-            for _ in range(bursts):
-                chain = MarkovChain(
-                    proposal=self._proposal,
-                    constraints=self._constraints,
-                    accept=always_accept,
-                    initial_state=self._best_part,
-                    total_steps=length,
-                )
-
-                for part in chain:
-                    yield part
-                    if pbar:
-                        pbar.update(1)
-
-                    part_score = self.lex_score(part)
-
-                    # Update best part if new one is lexicographically better or equal (up to current depth)
-                    if self.lex_geq(part_score, self._best_lex_score, depth=comparison_depth):
-                        self._best_part = part
-                        self._best_lex_score = part_score
-                    
-                        # Check bounded condition for the *current* target metric
-                        # We use the score from the tuple to avoid re-calculating
-                        current_metric_score = part_score[i]
-                        if metric.within_optimal_bound(current_metric_score):
-                            metric_optimized = True
-                            break
+                    print(f"Score: {part_score}")
                 
-                if metric_optimized:
-                    break
-            
-            if pbar:
-                pbar.close()
+                if self.lex_geq(part_score, self._best_lex_score, depth=comparison_depth):
+                    self._best_part = part
+                    self._best_lex_score = part_score
+                    if verbose:
+                        print(f"  New best score: {part_score}")
+                    
+                    # Check early stopping for current metric
+                    if metric.within_early_stopping_bound(part_score[i]):
+                        break
+        
+        return self._best_part

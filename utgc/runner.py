@@ -1026,7 +1026,7 @@ class EnsembleRunner:
         acceptance_threshold: Optional[float] = None,
         is_inclusive: bool = False,
         tolerance: float = 1e-6,
-        burst_length: int = 10,
+        burst_length: int = 50,
         num_bursts: int = 10,
     ) -> 'EnsembleRunner':
         """
