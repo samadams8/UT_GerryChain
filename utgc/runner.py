@@ -5,15 +5,18 @@ import pandas as pd
 import geopandas as gpd
 from functools import partial
 import random
-from typing import Optional, Dict, Any, List, Callable, Tuple, Literal
+import math 
+from typing import Optional, Dict, Any, List, Callable, Tuple, Literal, Union
 import yaml
 from math import ceil
+from statistics import mean
 import json
 from datetime import datetime
 import networkx as nx
 
-from gerrychain import Graph, GeographicPartition, MarkovChain, Partition, updaters, accept, optimization
-from gerrychain.proposals import recom
+from gerrychain import Graph, GeographicPartition, MarkovChain, Partition, updaters, accept
+from gerrychain.optimization import SingleMetricOptimizer
+from gerrychain.proposals import recom, propose_random_flip
 from gerrychain.tree import bipartition_tree
 from gerrychain.constraints import contiguous, UpperBound
 from gerrychain.metrics import polsby_popper
@@ -22,6 +25,7 @@ import numpy as np
 
 import utgc.metrics as utmetrics
 from . import run_utils as rutil
+from .optimization import LexicographicOptimizer, OptimizationMetric
 
 # --- ENSEMBLE RUNNER ---
 class EnsembleRunner:
@@ -73,11 +77,16 @@ class EnsembleRunner:
 
         self._tilted_run_params = {}
         self._optimization_scheme_params = {}
-        # Updaters to ignore from the output file
+        # Updaters to ignore when generating the output file
         self._ignored_updaters = set()
 
         self._precondition_params = {}
         self.preconditioned_partition = None
+        
+        self._lex_metrics = []
+        self._lex_burst_lengths = []
+        self._lex_num_bursts = []
+        self._lex_preoptimization_limit = 0
 
         self._callbacks = {}
 
@@ -221,6 +230,41 @@ class EnsembleRunner:
 
         self._population_params["pop_tolerance"] = tolerance
         print(f"Population deviation tolerance: {tolerance:%}")
+
+        return self
+
+    def add_pop_dev_updater(self, name: str = "pop_dev", ignore_output: bool = True) -> 'EnsembleRunner':
+        """
+        Add an updater to track the population deviation of each district from the ideal population.
+        The deviation is calculated as (actual_pop - ideal_pop).
+
+        Parameters
+        ----------
+        name : str, optional
+            Name of the updater, by default "pop_dev"
+        ignore_output : bool, optional
+            Whether to ignore the output of the updater, by default True
+
+        Returns
+        -------
+        EnsembleRunner
+            Self
+        """
+        # Record the construction history
+        self._construction_history.append({
+            "method": "add_pop_dev_updater",
+            "kwargs": { "name": name, "ignore_output": ignore_output }
+        })
+
+        ideal_pop = self._population_params["ideal_pop"]
+
+        self._updaters[name] = lambda p, target=ideal_pop: {
+            k: v - target for k, v in p["population"].items()
+        }
+        print(f"  Added population deviation updater: '{name}'")
+
+        if ignore_output: 
+            self.ignore_output(name)
 
         return self
 
@@ -974,6 +1018,140 @@ class EnsembleRunner:
 
         return self
     
+    def add_lexicographic_metric(self,
+        score_updater: str,
+        reduce: Optional[Literal["sum", "max", "min", "mean", "L1", "L2"]] = None,
+        maximize: bool = False,
+        optimal_bound: Optional[float] = None,
+        acceptance_threshold: Optional[float] = None,
+        is_inclusive: bool = False,
+        tolerance: float = 1e-6,
+        burst_length: int = 50,
+        num_bursts: int = 10,
+    ) -> 'EnsembleRunner':
+        """
+        Add a metric to the lexicographic optimization scheme. When adding multiple metrics, call this method multiple times, in priority order (highest priority first).
+
+        Parameters
+        ----------
+        score_updater : str
+            Name of the updater whose value should be optimized.
+        reduce : {"sum", "max", "min", "mean", "L1", "L2", "absmax", "absmin"}, optional
+            If the named updater has non-scalar outputs, indicate which reduction should be applied. The default is None. Options are:
+            - "sum": sum of the updater values
+            - "max": maximum of the updater values
+            - "min": minimum of the updater values
+            - "mean": mean of the updater values
+            - "L1": L1 norm of the updater values
+            - "L2": L2 norm of the updater values
+            - "absmax": maximum of the absolute values of the updater values
+            - "absmin": minimum of the absolute values of the updater values
+        maximize : bool, optional
+            Whether to maximize the metric rather than minimize it. The default is False.
+        optimal_bound : Optional[float], optional
+            The optimal bound for the metric. If specified, the optimizer will save time by terminatig early if the metric is within this bound of optimality. The default is None.
+        acceptance_threshold : Optional[float], optional
+            The acceptance threshold for the metric. If specified and a preoptimization limit is specified, the optimizer will run an initial pass to try to drive the metric to lie within the acceptance threshold for the initial proposal of the optimization itself. The default is None.
+        is_inclusive : bool, optional
+            Whether the metric bounds are inclusive. The default is False.
+        tolerance : float, optional
+            Tolerance to be used in determining whether two values are 'equal'. If the difference between two values is less than this tolerance, they are considered equal. The default is 1e-6.
+        burst_length : int, optional
+            The burst length for optimizing over this metric. The default is 10.
+        num_bursts : int, optional
+            The number of bursts to use for optimizing over this metric. The default is 10.
+
+        Returns
+        -------
+        self
+        """
+        # Record the construction history
+        self._construction_history.append({
+            "method": "add_lexicographic_metric",
+            "kwargs": {
+                "score_updater": score_updater,
+                "reduce": reduce,
+                "maximize": maximize,
+                "optimal_bound": optimal_bound,
+                "acceptance_threshold": acceptance_threshold,
+                "is_inclusive": is_inclusive,
+                "tolerance": tolerance,
+                "burst_length": burst_length,
+                "num_bursts": num_bursts,
+            }
+        })
+
+        if score_updater not in self._updaters:
+            warn(f"Lexicographic metric optimization requires an updater '{score_updater}', but it was not found. Add updater '{score_updater}' to the runner before running.")
+
+        def reduce_fn(value, reduction):
+            if reduction is None:
+                return value
+            
+            # Convert value to a list
+            if isinstance(value, dict):
+                v = list(value.values())
+            elif isinstance(value, tuple):
+                v = list(value)
+            elif isinstance(value, np.ndarray):
+                v = value.tolist()
+            else:
+                v = value
+        
+            if reduction == "min":
+                return min(v)
+            elif reduction == "max":
+                return max(v)
+            elif reduction == "absmax":
+                return max([abs(t) for t in v])
+            elif reduction == "absmin":
+                return min([abs(t) for t in v])
+            elif reduction == "sum":
+                return sum(v)
+            elif reduction == "mean":
+                return mean(v)
+            elif reduction == "L1":
+                return sum(abs(v))
+            elif reduction == "L2":
+                return sum([t**2 for t in v])**0.5
+            else:
+                raise ValueError(f"Unknown reduction '{reduction}'.")
+
+        self._lex_metrics.append(
+            OptimizationMetric(
+                lambda p: reduce_fn(p[score_updater], reduce),
+                maximize,
+                optimal_bound,
+                acceptance_threshold,
+                is_inclusive,
+                tolerance
+            )
+        )
+        self._lex_burst_lengths.append(burst_length)
+        self._lex_num_bursts.append(num_bursts)
+
+        print(f"Added lexicographic optimization metric '{score_updater}'")
+        print(f"  Reduce to: {reduce}")
+        print(f"  Maximize: {maximize}")
+        print(f"  Burst length: {burst_length}")
+        print(f"  Number of bursts: {num_bursts}")
+
+        return self
+
+    def add_lexicographic_preoptimization(self,
+        limit: int = 10000
+    ) -> 'EnsembleRunner':
+        self._construction_history.append({
+            "method": "add_lexicographic_preoptimization",
+            "kwargs": {
+                "limit": limit,
+            }
+        })
+        
+        self._lex_preoptimization_limit = limit
+
+        return self
+
     # Callbacks
     def add_runtime_callback(self,
         name: str,
@@ -1232,7 +1410,7 @@ class EnsembleRunner:
             if "not_equal_constraint" in self._constraint_params and self._constraint_params["not_equal_constraint"] is True:
                 constraints.append(rutil.NotEqual())
 
-            optimizer = optimization.SingleMetricOptimizer(
+            optimizer = SingleMetricOptimizer(
                 proposal=proposal,
                 constraints=constraints,
                 initial_state=initial_partition,
@@ -1358,7 +1536,7 @@ class EnsembleRunner:
             # Create optimization metric from updater name
             optimization_metric = self._create_optimization_metric(updater_name)
 
-            optimizer = optimization.SingleMetricOptimizer(
+            optimizer = SingleMetricOptimizer(
                 proposal=proposal,
                 constraints=self._constraints,
                 initial_state=initial_partition,
@@ -1382,7 +1560,7 @@ class EnsembleRunner:
             # Create optimization metric from updater name
             optimization_metric = self._create_optimization_metric(updater_name)
 
-            optimizer = optimization.SingleMetricOptimizer(
+            optimizer = SingleMetricOptimizer(
                 proposal=proposal,
                 constraints=self._constraints,
                 initial_state=initial_partition,
@@ -1405,12 +1583,46 @@ class EnsembleRunner:
 
         return partition_iterator
 
+    def _lexicographic_optimize(self, partition: Partition) -> Partition:
+        """
+        Run the configured LexicographicOptimizer on the partition.
+        """
+        if not self._lex_metrics:
+            warn("No valid metrics found for lexicographic optimization. Returning original partition.")
+            return partition
+
+        # Filter constraints
+        active_constraints = [c for c in self._constraints if not isinstance(c, rutil.NotEqual)]
+        
+        optimizer = LexicographicOptimizer(
+            proposal=propose_random_flip,
+            constraints=active_constraints,
+            initial_state=partition,
+            metrics=self._lex_metrics
+        )
+        
+        # Run sequential short bursts
+        # We need to consume the generator
+        from collections import deque
+        deque(
+            optimizer.sequential_short_bursts(
+                burst_lengths=self._lex_burst_lengths,
+                num_bursts=self._lex_num_bursts,
+                preoptimization_limit=self._lex_preoptimization_limit,
+                verbose=True
+            ),
+            maxlen=0
+        )
+        
+        return optimizer.best_part
+
     # --- Run Execution ---
     def run(self,
         name: Optional[str] = None,
         num_steps: int = 5000,
         output_dir: Optional[str] = None,
         use_preconditioned_partition: bool = True,
+        lexicographic_polish: bool = False,
     ):
         if name is None:
             save_dir = output_dir
@@ -1456,6 +1668,13 @@ class EnsembleRunner:
                 "num_steps": num_steps,
                 "use_preconditioned_partition": use_preconditioned_partition,
                 "preconditioning": self._precondition_params,
+                "lexicographic_polish": lexicographic_polish,
+                "lexicographic_params": {
+                    "metrics": self._lex_metrics,
+                    "burst_lengths": self._lex_burst_lengths,
+                    "num_bursts": self._lex_num_bursts,
+                    "preoptimization_limit": self._lex_preoptimization_limit
+                }
             },
             "construction": self._construction_history,
         }
@@ -1465,37 +1684,69 @@ class EnsembleRunner:
         
         # Set results path and open file for writing
         output_file = os.path.join(save_dir, "output.jsonl")
-        output_file_handle = open(output_file, "w")
         print("Running Markov chain...")
-        for iter, partition in enumerate(partition_iterator):
-            # Use (iter + 1) so that step numbers correspond to how many
-            # iterations have been completed at the time of the callback
-            step_number = iter + 1
+        
+        with open(output_file, "w") as output_file_handle:
+            for iter, partition in enumerate(partition_iterator):
+                # Use (iter + 1) so that step numbers correspond to how many
+                # iterations have been completed at the time of the callback
+                step_number = iter + 1
 
-            # Collect updater data from this step
-            data = {'step': step_number}
-            for updater_name in self._updaters.keys():
-                if updater_name in self._ignored_updaters:
-                    continue
+                # Polishing: Create side-branch if enabled
+                # if polish:
+                #     # Identify split updaters
+                #     split_keys = sorted([k for k in self._updaters if "split" in k])
+                    
+                #     def _get_split_vals(p):
+                #         vals = []
+                #         for k in split_keys:
+                #             try:
+                #                 vals.append(str(p[k]))
+                #             except Exception:
+                #                 vals.append("?")
+                #         return vals
 
-                value = partition[updater_name]
-                if isinstance(value, dict):
-                    # Sort the dictionary by key
-                    data[updater_name] = {
-                        str(k): v for k, v in sorted(value.items())
-                    }
+                #     # Capture before
+                #     vals_before = _get_split_vals(partition)
+                    
+                #     output_partition = self._polish_partition(partition, steps=polish_steps)
+                    
+                #     # Capture after
+                #     vals_after = _get_split_vals(output_partition)
+                    
+                #     if split_keys:
+                #          print(f"      [Debug] Splits: ({', '.join(vals_before)}) -> ({', '.join(vals_after)})")
+                
+                if lexicographic_polish:
+                    output_partition = self._lexicographic_optimize(partition)
+
                 else:
-                    data[updater_name] = value
-            output_file_handle.write(json.dumps(data) + "\n")
-            output_file_handle.flush()
+                    output_partition = partition
 
-            # Run callbacks
-            for _, value in self._callbacks.items():
-                if step_number % value['frequency'] == 0:
-                    value['action'](partition, step_number, save_dir)
-            
-            # Clear parent partition to save memory
-            partition.parent = None
+                # Collect updater data from this step (using output_partition)
+                data = {'step': step_number}
+                for updater_name in self._updaters.keys():
+                    if updater_name in self._ignored_updaters:
+                        continue
+
+                    value = output_partition[updater_name]
+                    if isinstance(value, dict):
+                        # Sort the dictionary by key
+                        data[updater_name] = {
+                            str(k): v for k, v in sorted(value.items())
+                        }
+                    else:
+                        data[updater_name] = value
+                output_file_handle.write(json.dumps(data) + "\n")
+                output_file_handle.flush()
+
+                # Run callbacks (using output_partition)
+                for _, value in self._callbacks.items():
+                    if step_number % value['frequency'] == 0:
+                        value['action'](output_partition, step_number, save_dir)
+                
+                # Clear parent partition to save memory
+                partition.parent = None
         
         output_file_handle.close()
 
