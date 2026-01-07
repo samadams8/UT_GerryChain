@@ -202,58 +202,15 @@ def _repair_contiguity(partition: Partition) -> Dict:
     
     return repaired_assignment
 
-geodata, initial_plan = _load_geodata(pop_geodata_path, initial_plan_path)
+import asyncio
+from concurrent.futures import ProcessPoolExecutor
+from networkx.readwrite import json_graph
+from utgc.proposals import propose_population_flip
 
-graph = Graph.from_geodataframe(geodata)
-
-pop_column = "TOTPOP"
-total_population = sum(geodata[pop_column])
-num_districts = len(initial_plan)
-ideal_pop = total_population / num_districts
-
-constraints = [contiguous]
-updaters = {
-    "population": updaters.Tally(pop_column, alias="population"),
-    "pop_dev": lambda p, target=ideal_pop: {
+def pop_dev_updater(p, target):
+    return {
         k: v - target for k, v in p["population"].items()
     }
-}
-
-initial_partition = GeographicPartition(
-    graph,
-    assignment="initial_plan",
-    updaters=updaters
-)
-
-if not contiguous(initial_partition):
-    repaired_assignment = _repair_contiguity(initial_partition)
-    initial_partition = GeographicPartition(
-        graph,
-        assignment=repaired_assignment
-    )
-
-print("Running ReCom randomizer ...")
-chain = MarkovChain(
-    proposal=partial(
-        recom,
-        pop_col=pop_column,
-        pop_target=ideal_pop,
-        epsilon=0.001,
-        method=partial(
-            bipartition_tree,
-            max_attempts=1000,
-            node_repeats=4,
-            allow_pair_reselection=True,
-            spanning_tree_fn=random_spanning_tree,
-        )
-    ),
-    constraints=constraints,
-    accept=accept.always_accept,
-    initial_state=initial_partition,
-    total_steps=10
-)
-
-from utgc.proposals import propose_population_flip
 
 def popdev_metric(p: Partition) -> float:
     sse = sum([v**2 for v in p["pop_dev"].values()])
@@ -263,19 +220,63 @@ def popdev_metric(p: Partition) -> float:
     else:
         return math.log(sse)
 
-for i, random_partition in enumerate(chain):
-    print("New random partition", i)
-    print(i, random_partition["pop_dev"])
+# Global variables for worker processes
+worker_graph = None
+worker_ideal_pop = None
+worker_updaters = None
+
+def init_worker(
+    graph_data: Dict, 
+    ideal_pop: float
+):
+    """
+    Initialize worker process by loading the graph from passed adjacency data.
+    This avoids reading files from disk in every worker.
+    """
+    global worker_graph, worker_ideal_pop, worker_updaters
+    
+    # Reconstruct graph from adjacency data
+    # This is much faster than reading from Shapefile/GeoJSON
+    g = json_graph.adjacency_graph(graph_data)
+    worker_graph = Graph.from_networkx(g)
+    worker_ideal_pop = ideal_pop
+    
+    pop_column = "TOTPOP"
+    worker_updaters = {
+        "population": updaters.Tally(pop_column, alias="population"),
+        "pop_dev": partial(pop_dev_updater, target=ideal_pop)
+    }
+
+def run_optimization_task(
+    assignment: Dict,
+    seed: int,
+    step_num: int
+) -> Tuple[int, Dict, float]:
+    
+    # Re-seed for this process
+    random.seed(seed)
+    np.random.seed(seed)
+    
+    # Reconstruct partition using global worker graph
+    constraints = [contiguous]
+
+    initial_partition = GeographicPartition(
+        worker_graph,
+        assignment=assignment,
+        updaters=worker_updaters
+    )
+
+    initial_popdev = initial_partition["pop_dev"]
+    print(f"Step {step_num}: Initial popdev: {initial_popdev}")
 
     smo = SingleMetricOptimizer(
-        # proposal=propose_random_flip,
         proposal=partial(
             propose_population_flip,
-            ideal_pop=ideal_pop,
+            ideal_pop=worker_ideal_pop,
             pop_key="population"
         ),
         constraints=constraints,
-        initial_state=random_partition,
+        initial_state=initial_partition,
         optimization_metric=popdev_metric,
         maximize=False
     )
@@ -283,19 +284,137 @@ for i, random_partition in enumerate(chain):
     steps = 10000
     beta_schedule = SingleMetricOptimizer.linear_jumpcycle_beta_function(
         duration_hot=0,
-        duration_cooldown=10000,
+        duration_cooldown=10000, #4*sum([abs(v) for v in initial_popdev.values()]),
         duration_cold=0
     )
 
-    for p in smo.simulated_annealing(
+    best_part = None
+    best_score = float('inf')
+
+    # Run annealing
+    for i, p in enumerate(smo.simulated_annealing(
         num_steps=steps,
         beta_function=beta_schedule,
         beta_magnitude=100,
-        with_progress_bar=True
-    ):            
+        with_progress_bar=False,
+    )):            
         if all([abs(v) < 1 for v in p["pop_dev"].values()]):
-            smo._best_part = p
-            smo._best_score = smo.score(p)
+            best_part = p
+            best_score = smo.score(p)
+            print(f"{step_num}: Found balanced partition at step {i}")
             break
+            
+    if best_part is None:
+        best_part = smo.best_part
+        best_score = smo.best_score
 
-    print(i, smo.best_part["pop_dev"])
+    print(f"Finished optimization for step {step_num} with popdev {best_part["pop_dev"]}")
+    return step_num, best_part["pop_dev"], best_score
+
+
+async def main():
+    geodata, initial_plan = _load_geodata(pop_geodata_path, initial_plan_path)
+    
+    graph = Graph.from_geodataframe(geodata)
+    
+    # Prepare lightweight graph data for workers
+    print("Preparing graph data for workers...")
+    graph_data = json_graph.adjacency_data(graph)
+    
+    pop_column = "TOTPOP"
+    total_population = sum(geodata[pop_column])
+    num_districts = len(initial_plan)
+    ideal_pop = total_population / num_districts
+    
+    constraints = [contiguous]
+    
+    # Use partial to bind ideal_pop to the function so it's picklable and self-contained
+    # But wait, lambda was `lambda p, target=ideal_pop: ...`
+    # We can use `partial` on `pop_dev_updater`
+    
+    updaters_dict = {
+        "population": updaters.Tally(pop_column, alias="population"),
+        "pop_dev": partial(pop_dev_updater, target=ideal_pop)
+    }
+    
+    initial_partition = GeographicPartition(
+        graph,
+        assignment="initial_plan",
+        updaters=updaters_dict
+    )
+    
+    if not contiguous(initial_partition):
+        repaired_assignment = _repair_contiguity(initial_partition)
+        initial_partition = GeographicPartition(
+            graph,
+            assignment=repaired_assignment,
+            updaters=updaters_dict
+        )
+
+    print("Running ReCom randomizer ...")
+    chain = MarkovChain(
+        proposal=partial(
+            recom,
+            pop_col=pop_column,
+            pop_target=ideal_pop,
+            epsilon=0.001,
+            method=partial(
+                bipartition_tree,
+                max_attempts=1000,
+                allow_pair_reselection=True,
+                spanning_tree_fn=random_spanning_tree,
+            )
+        ),
+        constraints=constraints,
+        accept=accept.always_accept,
+        initial_state=initial_partition,
+        total_steps=25
+    )
+
+    # Collect partitions from the chain first (synchronously)
+    # Because chain depends on previous state.
+    # We can optimize them in parallel after we have them, 
+    # OR we can submit them as they are generated if we don't care about order of execution strictly 
+    # (but they are independent optimization tasks from different starting points).
+    # Since the prompt says "enqueue the optimization of each ReCom step and execute in parallel",
+    # we can generate the chain, and for each step, spawn a task.
+    
+    loop = asyncio.get_running_loop()
+    
+    # ProcessPoolExecutor with initializer
+    with ProcessPoolExecutor(
+        max_workers=4,
+        initializer=init_worker,
+        initargs=(graph_data, ideal_pop)
+    ) as executor:
+        tasks = []
+        
+        print("Using ProcessPoolExecutor with max_workers=4")
+        
+        # We iterate the chain. This part is sequential.
+        for i, random_partition in enumerate(chain):
+            print(f"Generated ReCom partition {i}")
+            
+            # Pass only the assignment dictionary (safely picklable)
+            # random_partition.assignment is a wrapper, convert to dict
+            assignment_dict = dict(random_partition.assignment)
+            
+            task = loop.run_in_executor(
+                executor, 
+                run_optimization_task, 
+                assignment_dict, 
+                random_seed + i, # Different seed for each worker
+                i
+            )
+            tasks.append(task)
+        
+        print(f"Submitted {len(tasks)} optimization tasks. Waiting for results...")
+        
+        # Process results as they complete
+        for completed_task in asyncio.as_completed(tasks):
+            step_num, best_pop_dev, best_score = await completed_task
+            print(f"Result for step {step_num}: Score={best_score}")
+            # print(f"  Pop Dev: {best_pop_dev}") 
+
+if __name__ == "__main__":
+    asyncio.run(main())
