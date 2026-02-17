@@ -3,7 +3,6 @@ import random
 from dataclasses import dataclass, asdict
 import yaml
 from tqdm.auto import tqdm
-import data
 
 from gerrychain.chain import MarkovChain
 from gerrychain.partition import Partition

@@ -4,16 +4,13 @@ import yaml
 import geopandas as gpd
 import maup
 from typing import Optional, Dict, Any, List, Callable, Union
-from math import ceil
-from statistics import mean
-import numpy as np
 
-from gerrychain import Partition, GeographicPartition, MarkovChain, accept
-from gerrychain.constraints import contiguous
-from gerrychain.optimization import SingleMetricOptimizer
+from gerrychain import Partition, GeographicPartition
 
 from .configuration import ConfigurationManager
 from . import run_utils as rutil
+from .preconditioning import precondition as run_precondition
+from .chain import create_partition_iterator
 from .optimization import LexicographicOptimizer
 
 class EnsembleRunner:
@@ -59,158 +56,21 @@ class EnsembleRunner:
         initial_partition = self.config.initial_partition
         proposal = self.config.proposal(initial_partition)
 
-        # Define metrics for the optimization objective
-        def _optimization_metric(partition):
-            def _pop_dev(partition):
-                max_deviation = 0
-                for pop in partition["population"].values():
-                    max_deviation = max(max_deviation, abs(float(pop) - self.config.population_params["ideal_pop"]) / self.config.population_params["ideal_pop"])
-                return max_deviation
-
-            def _ceiling_objective(value, ceiling):
-                if value > ceiling:
-                    return abs(value - ceiling) ** 2
-                else:
-                    return 0
-
-            components = [
-                _ceiling_objective(_pop_dev(partition)/self.config.pop_tolerance, 1),
-            ]
-            for name, ceiling in self.config.constraint_params.items():
-                if "split" in name:
-                    try:
-                        num_splits = partition[name]
-                    except Exception:
-                        print(f"  WARNING: {name} not found in partition updaters!")
-                        num_splits = 0
-                    components.append(_ceiling_objective(num_splits, ceiling))
-            
-            return sum(components)
-
-        for attempt in range(max_attempts):
-            if attempt > 0:
-                print(f"  Retrying preconditioning (attempt {attempt + 1}/{max_attempts})...")
-            else:
-                print("Starting preconditioning...")
-
-            constraints = [contiguous,]
-            if "not_equal_constraint" in self.config.constraint_params and self.config.constraint_params["not_equal_constraint"] is True:
-                constraints.append(rutil.NotEqual())
-
-            optimizer = SingleMetricOptimizer(
-                proposal=proposal,
-                constraints=constraints,
-                initial_state=initial_partition,
-                optimization_metric=_optimization_metric,
-                maximize=False,
-            )
-
-            for _ in optimizer.short_bursts(
-                5,
-                ceil(steps / 5),
-                with_progress_bar=True,
-            ):
-                pass
-            optimized_partition = optimizer.best_part
-
-            passed_constraints = [c(optimized_partition) for c in self.config.constraints]
-            if all(passed_constraints):
-                print("  Preconditioning successful! All tolerances met.")
-                break
-            else:
-                print(f"  Preconditioning failed to meet all tolerances.")
-                initial_partition = optimized_partition
-
-        self.preconditioned_partition = GeographicPartition(
-            self.config.graph,
-            assignment=optimized_partition.assignment,
-            parent=None,
-            updaters=self.config.updaters
+        self.preconditioned_partition = run_precondition(
+            initial_partition=initial_partition,
+            proposal=proposal,
+            constraints=self.config.constraints,
+            constraint_params=self.config.constraint_params,
+            population_params=self.config.population_params,
+            graph=self.config.graph,
+            updaters=self.config.updaters,
+            steps=steps,
+            max_attempts=max_attempts,
         )
 
         return self
 
     # --- Internal Run Helper Methods ---
-    def _create_optimization_metric(self, updater_name: str):
-        def optimization_metric(partition):
-            value = partition[updater_name]
-            if isinstance(value, dict):
-                return sum(value.values())
-            elif isinstance(value, (set, list)):
-                return len(value)
-            else:
-                return value
-        return optimization_metric
-
-    def _create_partition_iterator(self,
-        proposal: Callable,
-        initial_partition: Partition,
-        num_steps: int,
-    ):
-        scheme_params = self.config.optimization_scheme_params.copy()
-        scheme = scheme_params.get("scheme", "neutral")
-
-        if scheme == "neutral":
-            chain = MarkovChain(
-                proposal=proposal,
-                constraints=self.config.constraints,
-                accept=accept.always_accept,
-                initial_state=initial_partition,
-                total_steps=num_steps
-            )
-            partition_iterator = chain.with_progress_bar()
-            print(f"Configured neutral run with {num_steps} steps")
-
-        elif scheme == "tilted":
-            updater_name = scheme_params.get("updater")
-            p_less_compact = scheme_params.get("less_compact_probability")
-            maximize = scheme_params.get("maximize", False)
-
-            optimization_metric = self._create_optimization_metric(updater_name)
-
-            optimizer = SingleMetricOptimizer(
-                proposal=proposal,
-                constraints=self.config.constraints,
-                initial_state=initial_partition,
-                optimization_metric=optimization_metric,
-                maximize=maximize,
-            )
-            partition_iterator = optimizer.tilted_run(
-                num_steps,
-                p=p_less_compact,
-                with_progress_bar=True
-            )
-            print(f"Configured tilted run with {num_steps} steps and p={p_less_compact}")
-
-        elif scheme == "short_bursts":
-            updater_name = scheme_params.get("updater")
-            maximize = scheme_params.get("maximize", False)
-
-            optimization_metric = self._create_optimization_metric(updater_name)
-
-            optimizer = SingleMetricOptimizer(
-                proposal=proposal,
-                constraints=self.config.constraints,
-                initial_state=initial_partition,
-                optimization_metric=optimization_metric,
-                maximize=maximize,
-            )
-
-            burst_length = scheme_params.get("burst_length", 100)
-            num_bursts = scheme_params.get("num_bursts", ceil(num_steps / burst_length))
-
-            partition_iterator = optimizer.short_bursts(
-                burst_length,
-                num_bursts,
-                with_progress_bar=True
-            )
-            print(f"Configured short_bursts run with {num_bursts} bursts of {burst_length} steps each")
-
-        else:
-            raise ValueError(f"Unknown optimization scheme: '{scheme}'")
-
-        return partition_iterator
-
     def _lexicographic_optimize(self, partition: Partition) -> Partition:
         if not self.config.lex_metrics:
             return partition
@@ -269,10 +129,12 @@ class EnsembleRunner:
         
         proposal = self.config.proposal(initial_partition)
 
-        partition_iterator = self._create_partition_iterator(
+        partition_iterator = create_partition_iterator(
             proposal=proposal,
             initial_partition=initial_partition,
-            num_steps=num_steps
+            constraints=self.config.constraints,
+            optimization_scheme_params=self.config.optimization_scheme_params,
+            num_steps=num_steps,
         )
 
         if output_dir:

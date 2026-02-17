@@ -5,29 +5,42 @@ import json
 import math
 from typing import Optional, Dict, Any, List, Callable, Tuple, Literal, Union
 from warnings import warn
-from functools import partial
 from datetime import datetime
 from statistics import mean
 
 import pandas as pd
 import geopandas as gpd
+import maup
 import networkx as nx
 import numpy as np
 
-import maup
-from gerrychain import Graph, GeographicPartition, Partition, updaters
+from gerrychain import GeographicPartition, Partition, updaters
 from gerrychain.constraints import contiguous, UpperBound
 from gerrychain.metrics import polsby_popper
-from gerrychain.proposals import recom
-from gerrychain.tree import bipartition_tree
 from gerrychain.updaters.locality_split_scores import LocalitySplits
-from gerrychain.optimization import SingleMetricOptimizer
 
 import utgc.metrics as utmetrics
 from . import run_utils as rutil
+from .graph_builder import load_geodata_and_build_graph
+from .partition_builder import build_initial_partition
+from .proposals import create_recom_proposal
 from .optimization import LexicographicOptimizer, OptimizationMetric
 
 class ConfigurationManager:
+    """
+    Fluent builder for redistricting run setup. Composes graph, partition,
+    proposal, constraints, and updaters for use with GerryChain or EnsembleRunner.
+
+    **GerryChain inputs (use directly in notebooks):**
+    - ``graph``: GerryChain Graph from geodata.
+    - ``geodata``, ``initial_plan``: GeoDataFrames (loaded and optionally projected).
+    - ``initial_partition``: GeographicPartition (repaired for contiguity).
+    - ``proposal(partition)``: ReCom proposal with configured surcharges/penalties.
+    - ``constraints``: List of constraint callables for MarkovChain/optimizers.
+    - ``updaters``: Dict of partition updaters.
+    - ``population_params``, ``optimization_scheme_params``, ``lex_metrics``, etc.
+    """
+
     def __init__(
         self,
         pop_geodata_path: str,
@@ -48,13 +61,12 @@ class ConfigurationManager:
             random.seed(random_seed)
             np.random.seed(random_seed)
 
-        self.geodata, self.initial_plan = self._load_geodata(pop_geodata_path, initial_plan_path)
-        self.graph = Graph.from_geodataframe(self.geodata)
+        self.geodata, self.initial_plan, self.graph = load_geodata_and_build_graph(
+            pop_geodata_path, initial_plan_path
+        )
 
         total_population = sum(self.geodata[pop_column])
         num_districts = len(self.initial_plan)
-
-        print(f"  Graph built with {len(self.graph.nodes)} nodes, {len(self.graph.edges)} edges")
 
         self.population_params = {
             "column_id": pop_column,
@@ -93,185 +105,14 @@ class ConfigurationManager:
     
     @property
     def initial_partition(self) -> Partition:
-        tmp = GeographicPartition(
-            self.graph, assignment="initial_plan", updaters=self.updaters
+        return build_initial_partition(
+            self.graph,
+            assignment="initial_plan",
+            updaters=self.updaters,
+            num_districts=self.population_params["num_districts"],
+            repair=True,
         )
 
-        if not contiguous(tmp):
-            repaired_assignment = self._repair_contiguity(tmp)
-            
-            # Create a new partition with the repaired assignment
-            tmp = GeographicPartition(
-                self.graph,
-                assignment=repaired_assignment,
-                updaters=self.updaters
-            )
-
-        if not contiguous(tmp):
-            warn("Contiguity repair may not have fully resolved all issues. You should check your initial plan or population geodata for compatibility issues.")
-        
-        return tmp
-
-    # --- Geodata and Graph Utilities ---
-
-    def _load_geodata(self,
-        pop_geodata_path: str,
-        initial_plan_path: str,
-        crs: Optional[str] = "EPSG:26912",
-    ) -> Tuple[gpd.GeoDataFrame, gpd.GeoDataFrame]:
-        geodata = gpd.read_file(pop_geodata_path)
-        print(f"Loaded {len(geodata)} segments from {pop_geodata_path}")
-        initial_plan = gpd.read_file(initial_plan_path)
-        print(f"Loaded {len(initial_plan)} districts from {initial_plan_path}")
-
-        if crs:
-             print(f"Projecting to {crs}")
-             geodata = geodata.to_crs(crs)
-             initial_plan = initial_plan.to_crs(crs)
-
-        # Create unique IDs for unincorporated municipalities
-        if "MUNIID" in geodata.columns and any(geodata["MUNIID"] == ""):
-            print("Found %d nodes assigned to %d incorporated municipalities" % (
-                (geodata["MUNIID"] != "").sum(),
-                len(set(geodata[geodata["MUNIID"] != ""]["MUNIID"]))
-            ))
-            print("Assigning unique IDs to unincorporated nodes...")
-            
-            # Get existing numeric MUNIIDs
-            existing_muniids = geodata[geodata["MUNIID"] != ""]["MUNIID"]
-            if len(existing_muniids) > 0:
-                max_id = int(existing_muniids.astype(int).max())
-            else:
-                max_id = 0
-
-            # Generate unique sequential IDs for unincorporated areas
-            unincorporated_mask = geodata["MUNIID"] == ""
-            unincorporated_count = unincorporated_mask.sum()
-            if unincorporated_count > 0:
-                geodata.loc[unincorporated_mask, "MUNIID"] = np.arange(max_id + 1, max_id + 1 + unincorporated_count)
-                print(f"Assigned unique IDs to {unincorporated_count} unincorporated nodes")
-            
-            # Print final municipality count
-            num_unique_munis = len(set(geodata["MUNIID"]))
-            print(f"Total unique MUNIIDs: {num_unique_munis}")
-
-        # Assign initial plan to geodata
-        geodata["initial_plan"] = maup.assign(geodata, initial_plan)
-        if "area" not in geodata.columns:
-            geodata["area"] = geodata.geometry.area
-
-        return geodata, initial_plan
-
-    def _repair_contiguity(self, partition: Partition) -> Dict:
-        """
-        Repair non-contiguous districts by reassigning disconnected components
-        to adjacent districts. This function iterates until contiguity is achieved
-        or max_iterations is reached.
-        """
-        graph = partition.graph
-        repaired_assignment = dict(partition.assignment)
-        
-        # Create a temporary partition to check contiguity
-        def _is_contiguous(assignment_dict):
-            temp_partition = GeographicPartition(
-                graph,
-                assignment=assignment_dict,
-                updaters={}
-            )
-            return contiguous(temp_partition)
-        
-        for iteration in range(2*self.population_params["num_districts"]):
-            if _is_contiguous(repaired_assignment):
-                break
-            
-            # Handle unassigned nodes first
-            unassigned_nodes = [
-                node for node in graph.nodes 
-                if repaired_assignment[node] is None or pd.isna(repaired_assignment[node])
-            ]
-            
-            for node in unassigned_nodes:
-                # Find adjacent districts
-                neighbors = list(graph.neighbors(node))
-                adjacent_districts = []
-                for neighbor in neighbors:
-                    neighbor_dist = repaired_assignment.get(neighbor)
-                    if neighbor_dist is not None and not pd.isna(neighbor_dist):
-                        adjacent_districts.append(neighbor_dist)
-                
-                if adjacent_districts:
-                    # Assign to the most common adjacent district
-                    repaired_assignment[node] = max(set(adjacent_districts), 
-                                                   key=adjacent_districts.count)
-                else:
-                    # No adjacent districts found, assign to first available district
-                    available_districts = [d for d in set(repaired_assignment.values()) 
-                                         if d is not None and not pd.isna(d)]
-                    if available_districts:
-                        repaired_assignment[node] = random.choice(available_districts)
-            
-            # Now repair non-contiguous districts
-            districts_to_check = set(repaired_assignment.values())
-            districts_to_check.discard(None)
-            
-            repairs_made = False
-            for district in districts_to_check:
-                # Get all nodes in this district
-                district_nodes = [node for node in graph.nodes 
-                                if repaired_assignment[node] == district]
-                
-                if not district_nodes:
-                    continue
-                    
-                # Find connected components within this district
-                district_subgraph = graph.subgraph(district_nodes)
-                components = list(nx.connected_components(district_subgraph))
-                
-                if len(components) <= 1:
-                    # District is already contiguous
-                    continue
-                
-                repairs_made = True
-                # Sort components by size (largest first)
-                components = sorted(components, key=len, reverse=True)
-                
-                # Keep the largest component in the original district
-                # Reassign smaller components to adjacent districts
-                for component in components[1:]:
-                    # Find adjacent districts for this component
-                    neighbor_districts = []
-                    for node in component:
-                        neighbors = list(graph.neighbors(node))
-                        for neighbor in neighbors:
-                            neighbor_dist = repaired_assignment.get(neighbor)
-                            if (neighbor_dist is not None and 
-                                neighbor_dist != district and 
-                                not pd.isna(neighbor_dist)):
-                                neighbor_districts.append(neighbor_dist)
-                    
-                    if neighbor_districts:
-                        # Use most common adjacent district
-                        target_district = max(set(neighbor_districts), 
-                                            key=neighbor_districts.count)
-                    else:
-                        # No adjacent districts found, try to find any available district
-                        available_districts = [d for d in districts_to_check if d != district]
-                        if available_districts:
-                            target_district = random.choice(available_districts)
-                        else:
-                            # Fallback: keep in original district (shouldn't happen)
-                            target_district = district
-                    
-                    # Reassign all nodes in this component
-                    for node in component:
-                        repaired_assignment[node] = target_district
-            
-            # If no repairs were made, break to avoid infinite loop
-            if not repairs_made:
-                break
-        
-        return repaired_assignment
-    
     # --- Configuration Methods ---
 
     # Population
@@ -939,30 +780,14 @@ class ConfigurationManager:
     def proposal(self, initial_partition: Optional[Partition] = None) -> Callable[[Partition], Partition]:
         if not initial_partition:
             initial_partition = self.initial_partition
-
         num_districts = len(initial_partition)
-        ideal_population = self.population_params["ideal_pop"]
-
-        spanning_tree_fn = partial(
-            rutil.random_spanning_tree_with_edge_penalties,
-            edge_penalties=self.edge_penalties
+        return create_recom_proposal(
+            self.population_params,
+            self.region_surcharges,
+            self.edge_penalties,
+            num_districts=num_districts,
+            pop_tolerance=self.pop_tolerance,
         )
-
-        proposal = partial(
-            recom,
-            pop_col=self.population_params["column_id"],
-            pop_target=ideal_population,
-            epsilon=self.pop_tolerance,
-            node_repeats=num_districts,
-            region_surcharge=self.region_surcharges,
-            method=partial(
-                bipartition_tree,
-                max_attempts=1000,
-                allow_pair_reselection=True,
-                spanning_tree_fn=spanning_tree_fn,
-            )
-        )
-        return proposal
 
     @classmethod
     def from_config(cls, config_path: str) -> 'ConfigurationManager':
@@ -1021,3 +846,32 @@ class ConfigurationManager:
                 print(f"Warning: Method '{method_name}' not found on ConfigurationManager. Skipping.")
 
         return instance
+
+    def compute_metrics_for_map(self, shapefile_path: str) -> Dict[str, Any]:
+        """
+        Compute partition updater values for a map (shapefile) using this config's
+        graph and updaters. Useful for comparing a proposed or enacted map to the ensemble.
+        """
+        user_map = gpd.read_file(shapefile_path)
+        if self.geodata.crs != user_map.crs:
+            user_map = user_map.to_crs(self.geodata.crs)
+        geodata_copy = self.geodata.copy()
+        geodata_copy["user_assignment"] = maup.assign(geodata_copy, user_map)
+        for node in self.graph.nodes:
+            if node in geodata_copy.index:
+                self.graph.nodes[node]["user_assignment"] = geodata_copy.loc[node, "user_assignment"]
+        partition = GeographicPartition(
+            self.graph,
+            assignment="user_assignment",
+            updaters=self.updaters,
+        )
+        data = {}
+        for updater_name in self.updaters.keys():
+            if updater_name in self.ignored_updaters:
+                continue
+            value = partition[updater_name]
+            if isinstance(value, dict):
+                data[updater_name] = {str(k): v for k, v in sorted(value.items())}
+            else:
+                data[updater_name] = value
+        return data
