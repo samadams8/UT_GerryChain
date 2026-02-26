@@ -2,16 +2,12 @@ import os
 import random
 import yaml
 import json
-import math
 from typing import Optional, Dict, Any, List, Callable, Tuple, Literal, Union
 from warnings import warn
 from datetime import datetime
 from statistics import mean
 
 import pandas as pd
-import geopandas as gpd
-import maup
-import networkx as nx
 import numpy as np
 
 from gerrychain import GeographicPartition, Partition, updaters
@@ -21,7 +17,6 @@ from gerrychain.updaters.locality_split_scores import LocalitySplits
 
 import utgc.metrics as utmetrics
 from . import run_utils as rutil
-from .graph_builder import load_geodata_and_build_graph
 from .partition_builder import build_initial_partition
 from .proposals import create_recom_proposal
 from .optimization import LexicographicOptimizer, OptimizationMetric
@@ -32,9 +27,8 @@ class ConfigurationManager:
     proposal, constraints, and updaters for use with GerryChain or EnsembleRunner.
 
     **GerryChain inputs (use directly in notebooks):**
-    - ``graph``: GerryChain Graph from geodata.
-    - ``geodata``, ``initial_plan``: GeoDataFrames (loaded and optionally projected).
-    - ``initial_partition``: GeographicPartition (repaired for contiguity).
+    - ``graph``: GerryChain Graph (typically built from geodata upstream).
+    - ``initial_partition``: Partition / GeographicPartition (repaired for contiguity).
     - ``proposal(partition)``: ReCom proposal with configured surcharges/penalties.
     - ``constraints``: List of constraint callables for MarkovChain/optimizers.
     - ``updaters``: Dict of partition updaters.
@@ -43,52 +37,36 @@ class ConfigurationManager:
 
     def __init__(
         self,
-        pop_geodata_path: str,
-        initial_plan_path: str,
         random_seed: Optional[int] = None,
         pop_column: Optional[str] = "TOTPOP",
+        pop_tolerance: float = 0.01,
     ):
-        self.init_params = {}
-        if not pop_geodata_path:
-            raise ValueError("Population geodata path must be provided.")
-        if not initial_plan_path:
-            raise ValueError("Initial plan path must be provided.")
-        self.init_params["pop_geodata_path"] = pop_geodata_path
-        self.init_params["initial_plan_path"] = initial_plan_path
-        
-        if random_seed:
+        # Schema/defaults only; geography/graphs are provided by callers.
+        self.init_params = {
+            "pop_column": pop_column,
+            "pop_tolerance": pop_tolerance,
+        }
+        if random_seed is not None:
             self.init_params["random_seed"] = random_seed
             random.seed(random_seed)
             np.random.seed(random_seed)
 
-        self.geodata, self.initial_plan, self.graph = load_geodata_and_build_graph(
-            pop_geodata_path, initial_plan_path
-        )
-
-        total_population = sum(self.geodata[pop_column])
-        num_districts = len(self.initial_plan)
-
         self.population_params = {
             "column_id": pop_column,
-            "total_pop": total_population,
-            "num_districts": num_districts,
-            "ideal_pop": total_population / num_districts,
-            "pop_tolerance": 0.01,
+            "pop_tolerance": pop_tolerance,
+            "total_pop": None,
+            "num_districts": None,
+            "ideal_pop": None,
         }
 
-        # Record which configuration methods were used
         self.construction_history = []
-
         self.region_surcharges = {}
         self.edge_penalty_params = {}
         self.edge_penalties = {}
-
         self.constraint_params = {}
         self.constraints = [contiguous,]
-
         self.optimization_scheme_params = {}
         self.ignored_updaters = set()
-        
         self.lex_metrics = []
         self.lex_burst_lengths = []
         self.lex_num_bursts = []
@@ -98,22 +76,62 @@ class ConfigurationManager:
             "population": updaters.Tally(pop_column, alias="population"),
         }
 
+    def build_initial_partition_from_graph(
+        self,
+        graph,
+        assignment_key: str = "initial_plan",
+        num_districts: Optional[int] = None,
+        repair: bool = True,
+    ) -> Partition:
+        """
+        Build initial partition from a graph (and keys). No geodata required.
+        Use this when you have a graph from GeographyManager or another source.
+        """
+        if num_districts is None:
+            part = GeographicPartition(graph, assignment=assignment_key, updaters=self.updaters)
+            num_districts = len(part)
+        return build_initial_partition(
+            graph,
+            assignment=assignment_key,
+            updaters=self.updaters,
+            num_districts=num_districts,
+            repair=repair,
+        )
+
     # Properties
     @property
     def pop_tolerance(self) -> float:
         return self.population_params.get("pop_tolerance", 0.01)
-    
-    @property
-    def initial_partition(self) -> Partition:
-        return build_initial_partition(
-            self.graph,
-            assignment="initial_plan",
-            updaters=self.updaters,
-            num_districts=self.population_params["num_districts"],
-            repair=True,
-        )
 
     # --- Configuration Methods ---
+
+    # Population
+    def set_population_from_partition(self, partition: Partition) -> "ConfigurationManager":
+        """
+        Configure population_params and population-related updaters from a partition.
+
+        Expects that the partition's graph has the configured population column.
+        """
+        pop_col = self.population_params["column_id"]
+        total_population = sum(
+            partition.graph.nodes[n].get(pop_col, 0) for n in partition.graph.nodes
+        )
+        num_districts = len(partition)
+        self.population_params["total_pop"] = total_population
+        self.population_params["num_districts"] = num_districts
+        self.population_params["ideal_pop"] = total_population / num_districts
+
+        # Refresh population and pop_dev updaters to use the new ideal_pop.
+        self.updaters["population"] = updaters.Tally(pop_col, alias="population")
+        if "pop_dev" in self.updaters:
+            ideal_pop = self.population_params["ideal_pop"]
+
+            def _pop_dev_refresh(p, target=ideal_pop):
+                return {k: v - target for k, v in p["population"].items()}
+
+            self.updaters["pop_dev"] = _pop_dev_refresh
+
+        return self
 
     # Population
     def set_pop_dev_tolerance(self, tolerance: float = 0.01) -> 'ConfigurationManager':
@@ -132,11 +150,10 @@ class ConfigurationManager:
             "kwargs": { "name": name, "ignore_output": ignore_output }
         })
 
-        ideal_pop = self.population_params["ideal_pop"]
-
-        self.updaters[name] = lambda p, target=ideal_pop: {
-            k: v - target for k, v in p["population"].items()
-        }
+        def _pop_dev_fn(p, mgr=self):
+            target = mgr.population_params["ideal_pop"]
+            return {k: v - target for k, v in p["population"].items()}
+        self.updaters[name] = _pop_dev_fn
         print(f"  Added population deviation updater: '{name}'")
 
         if ignore_output: 
@@ -321,59 +338,18 @@ class ConfigurationManager:
         if ignore_ls_output:
             self.ignore_output(ls_name)
 
-        # Count number of localities
-        num_localities = len(set(dict(self.graph.nodes(data=column_id)).values()))
-
         sname = f"split_{name}"
-        self.updaters[sname] = \
-            lambda p, ls=ls_name: p[ls].get("num_split_localities", 0)
+        self.updaters[sname] = lambda p, ls=ls_name: p[ls].get("num_split_localities", 0)
         print(f"  Added split updater: '{sname}'")
-        
+
         msname = f"{name}_multi_splits"
-        self.updaters[msname] = \
-            lambda p, ls=ls_name, sn=sname, nl=num_localities: p[ls].get("num_parts", 0) - p[sn] - nl
+        def _multi_splits_fn(p, ls=ls_name, sn=sname, col=column_id):
+            num_localities = len(set(dict(p.graph.nodes(data=col)).values()))
+            return p[ls].get("num_parts", 0) - p[sn] - num_localities
+        self.updaters[msname] = _multi_splits_fn
         print(f"  Added multi-split updater: '{msname}'")
 
         return self
-
-    def make_total_column(
-        self,
-        total_col: str,
-        all_election_columns: List[str],
-    ) -> 'ConfigurationManager':
-        if total_col not in self.geodata.columns:
-            party_cols = [col for col in all_election_columns if col in self.geodata.columns]
-            
-            if party_cols:
-                self.geodata[total_col] = 0
-                for col in party_cols:
-                    try:
-                        self.geodata[total_col] = self.geodata[total_col].fillna(0) + self.geodata[col].fillna(0)
-                    except Exception:
-                        self.geodata[total_col] = self.geodata[total_col].fillna(0) + pd.to_numeric(self.geodata[col], errors='coerce').fillna(0)
-            
-            if total_col in self.geodata.columns:
-                for node in self.graph.nodes:
-                    if node in self.geodata.index:
-                        self.graph.nodes[node][total_col] = self.geodata.loc[node, total_col]
-        
-        return self
-
-    def available_election_columns(self, years: List[int], offices: List[str]) -> List[str]:
-        available_columns = set(self.geodata.columns)
-        available_elections = []
-
-        for column in available_columns:
-            if element_is_election_column := (isinstance(column, str) and column.startswith("G")):
-                try:
-                    year = int(column[1:3]) + 2000
-                    office = column[3:6]
-                    if year in years and office in offices:
-                        available_elections.append(column)
-                except ValueError:
-                    pass
-
-        return sorted(available_elections)
 
     def add_election_updater(
         self,
@@ -399,124 +375,44 @@ class ConfigurationManager:
         if ignore_output:
             self.ignore_output(name)
 
-        for column in parties_to_columns.values():
-            if column not in self.geodata.columns:
-                print(f"  WARNING: Column '{column}' not found in geodata. Please check the column names and try again.")
-
         return self
 
     def add_election_updaters(
         self,
-        years: Optional[List[int]] = None,
-        elections: Optional[List[str]] = None,
-        parties: Optional[List[str]] = ['R', 'D', '-'],
-        parties_to_columns_override: Optional[Dict[str, Dict[str, str]]] = {},
-        skip_if_missing_parties: bool = True,
+        elections: Dict[str, Dict[str, str]],
         ignore_output: bool = True,
+        skip_if_missing_parties: bool = False,
     ) -> 'ConfigurationManager':
-        # Logic matches Runner.add_election_updaters exactly
-        columns = []
-        for c in self.geodata.columns:
-            if isinstance(c, str) and len(c) >= 3 and c.startswith("G") and c[1:3].isdigit():
-                columns.append(c)
+        """
+        Add election updaters for multiple elections from an explicit mapping.
 
-        current_year = datetime.now().year
-        def two_digit_to_year(yy_str: str) -> int:
-            yy = int(yy_str)
-            candidate = 2000 + yy
-            if candidate <= current_year:
-                return candidate
-            return 1900 + yy
+        Parameters
+        ----------
+        elections : dict
+            Mapping from election name (e.g. \"2012PRE\") to parties_to_columns
+            dict suitable for `add_election_updater`.
+        ignore_output : bool, optional
+            If True, hide each election updater from output by default.
+        skip_if_missing_parties : bool, optional
+            If True, skip elections whose parties_to_columns mapping is empty.
+        """
+        self.construction_history.append({
+            "method": "add_election_updaters",
+            "kwargs": {
+                "elections": elections,
+                "ignore_output": ignore_output,
+                "skip_if_missing_parties": skip_if_missing_parties,
+            },
+        })
 
-        discovered_years = sorted({two_digit_to_year(c[1:3]) for c in columns if len(c) >= 3 and c[1:3].isdigit()})
-        discovered_offices = sorted({c[3:6] for c in columns if len(c) >= 6})
-
-        years = years or discovered_years
-        elections = elections or discovered_offices
-
-        election_to_cols: Dict[str, List[str]] = {}
-        for col in columns:
-            try:
-                yy_str = col[1:3]
-                if len(col) < 6:
-                    continue
-                office = col[3:6]
-                if not (yy_str.isdigit() and len(office) == 3):
-                    continue
-                year = two_digit_to_year(yy_str)
-            except Exception:
+        for name, parties_to_columns in elections.items():
+            if skip_if_missing_parties and not parties_to_columns:
                 continue
-
-            if (year in years) and (office in elections):
-                ename = f"{year:04d}{office}"
-                election_to_cols.setdefault(ename, []).append(col)
-
-        for ename, cols in sorted(election_to_cols.items()):
-            year = int(ename[:4])
-            office = ename[4:7]
-            yy = f"{year % 100:02d}"
-
-            party_initial_to_cols: Dict[str, List[str]] = {}
-            for c in cols:
-                if len(c) < 7:
-                    continue
-                # Handle cases where party might be missing or different
-                party_initial = c[6]
-                party_initial_to_cols.setdefault(party_initial, []).append(c)
-
-            parties_to_columns: Dict[str, str] = {}
-            for initial, plist in party_initial_to_cols.items():
-                if len(plist) == 1:
-                    parties_to_columns[initial] = plist[0]
-                else:
-                    for i, pc in enumerate(sorted(plist)):
-                        parties_to_columns[f"{initial}{i+1}"] = pc
-
-            total_col = f"G{yy}{office}-TOT"
-            parties_to_columns["-"] = total_col
-
-            if ename in parties_to_columns_override:
-                override_columns = set(parties_to_columns_override[ename].values())
-                keys_to_remove = [
-                    key for key, col in parties_to_columns.items()
-                    if col in override_columns and key != "-"
-                ]
-                for key in keys_to_remove:
-                    del parties_to_columns[key]
-                
-                for k, v in parties_to_columns_override[ename].items():
-                    parties_to_columns[k] = v
-
-            if parties is not None:
-                filtered_parties_to_columns: Dict[str, str] = {}
-                for party_key, col_name in parties_to_columns.items():
-                    if party_key == "-":
-                        if "-" in parties:
-                            filtered_parties_to_columns[party_key] = col_name
-                    else:
-                        for party_init in parties:
-                            if party_key.startswith(party_init):
-                                filtered_parties_to_columns[party_key] = col_name
-                                break
-                parties_to_columns = filtered_parties_to_columns
-
-            if "-" in parties_to_columns:
-                total_col = parties_to_columns["-"]
-                self.make_total_column(total_col, cols)
-
-            if (
-                not skip_if_missing_parties
-                or all( (
-                    p in parties_to_columns.keys()
-                    or any( c.startswith(p) for c in parties_to_columns.keys() )
-                    ) for p in parties
-                )
-            ):
-                self.add_election_updater(
-                    name=ename,
-                    parties_to_columns=parties_to_columns,
-                    ignore_output=ignore_output,
-                )
+            self.add_election_updater(
+                name=name,
+                parties_to_columns=parties_to_columns,
+                ignore_output=ignore_output,
+            )
 
         return self
 
@@ -777,9 +673,18 @@ class ConfigurationManager:
         return self
 
     # --- Proposal Creation ---
-    def proposal(self, initial_partition: Optional[Partition] = None) -> Callable[[Partition], Partition]:
-        if not initial_partition:
-            initial_partition = self.initial_partition
+    def proposal(self, initial_partition: Partition) -> Callable[[Partition], Partition]:
+        """
+        Create a ReCom proposal for a given initial partition.
+
+        Requires that population_params (including ideal_pop) have been
+        configured, e.g. via set_population_from_partition(initial_partition).
+        """
+        if self.population_params.get("ideal_pop") is None:
+            raise RuntimeError(
+                "population_params['ideal_pop'] is not set. "
+                "Call set_population_from_partition(initial_partition) before proposal()."
+            )
         num_districts = len(initial_partition)
         return create_recom_proposal(
             self.population_params,
@@ -789,55 +694,75 @@ class ConfigurationManager:
             pop_tolerance=self.pop_tolerance,
         )
 
+    def to_config(self, config_path: str) -> None:
+        """
+        Write a configuration-only YAML file that can be loaded with from_config().
+        """
+        data: Dict[str, Any] = {
+            "initialization": dict(self.init_params),
+            "construction": list(self.construction_history),
+        }
+        with open(config_path, "w") as f:
+            yaml.safe_dump(data, f, sort_keys=False)
+
     @classmethod
     def from_config(cls, config_path: str) -> 'ConfigurationManager':
+        """
+        Construct a ConfigurationManager from a configuration-only YAML file.
+
+        The file is expected to contain:
+        - initialization: schema defaults (pop_column, pop_tolerance, random_seed)
+        - construction: list of {method, kwargs} entries
+
+        Geography and run metadata are not loaded here.
+        """
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
         with open(config_path, "r") as f:
-            config_data = yaml.safe_load(f)
+            config_data = yaml.safe_load(f) or {}
 
-        init_params = config_data.get("initialization", {})
-        
-        # Helper to resolve relative paths if they don't exist
+        init_section = config_data.get("initialization", {})
         config_dir = os.path.dirname(os.path.abspath(config_path))
-        def resolve_path(path):
+
+        def resolve_path(path: Optional[str]) -> Optional[str]:
+            if path is None or not path:
+                return path
             if os.path.exists(path):
                 return path
-            # Try relative to config file
             rel_path = os.path.join(config_dir, path)
             if os.path.exists(rel_path):
                 return rel_path
-            # Try relative to project root (heuristically backing up)
-            # Assuming config is in output/TAG/run/config.yaml
-            # Project root is likely 3 levels up
             root_path = os.path.join(config_dir, "../../..", path)
             if os.path.exists(root_path):
                 return os.path.abspath(root_path)
-            return path # Return original if resolution fails
+            return path
 
-        if "pop_geodata_path" in init_params:
-            init_params["pop_geodata_path"] = resolve_path(init_params["pop_geodata_path"])
-        if "initial_plan_path" in init_params:
-            init_params["initial_plan_path"] = resolve_path(init_params["initial_plan_path"])
+        init_kwargs = {
+            "pop_column": init_section.get("pop_column", "TOTPOP"),
+            "pop_tolerance": init_section.get("pop_tolerance", 0.01),
+        }
+        if "random_seed" in init_section:
+            init_kwargs["random_seed"] = init_section["random_seed"]
 
         try:
-            instance = cls(**init_params)
+            instance = cls(**init_kwargs)
         except TypeError as e:
-            raise ValueError(f"Error authenticating ConfigurationManager with params {init_params}: {e}")
+            raise ValueError(f"Error creating ConfigurationManager with params {init_kwargs}: {e}")
 
-        # Replay construction history
         construction_history = config_data.get("construction", [])
         for step in construction_history:
             method_name = step.get("method")
-            kwargs = step.get("kwargs", {})
-            
+            kwargs = step.get("kwargs", {}) or {}
+
+            if not isinstance(method_name, str):
+                continue
+
             if hasattr(instance, method_name):
                 method = getattr(instance, method_name)
                 # Handle potential path arguments in kwargs (e.g. edge penalties)
                 if "csv_path" in kwargs:
                     kwargs["csv_path"] = resolve_path(kwargs["csv_path"])
-                
                 try:
                     method(**kwargs)
                 except Exception as e:
@@ -846,32 +771,3 @@ class ConfigurationManager:
                 print(f"Warning: Method '{method_name}' not found on ConfigurationManager. Skipping.")
 
         return instance
-
-    def compute_metrics_for_map(self, shapefile_path: str) -> Dict[str, Any]:
-        """
-        Compute partition updater values for a map (shapefile) using this config's
-        graph and updaters. Useful for comparing a proposed or enacted map to the ensemble.
-        """
-        user_map = gpd.read_file(shapefile_path)
-        if self.geodata.crs != user_map.crs:
-            user_map = user_map.to_crs(self.geodata.crs)
-        geodata_copy = self.geodata.copy()
-        geodata_copy["user_assignment"] = maup.assign(geodata_copy, user_map)
-        for node in self.graph.nodes:
-            if node in geodata_copy.index:
-                self.graph.nodes[node]["user_assignment"] = geodata_copy.loc[node, "user_assignment"]
-        partition = GeographicPartition(
-            self.graph,
-            assignment="user_assignment",
-            updaters=self.updaters,
-        )
-        data = {}
-        for updater_name in self.updaters.keys():
-            if updater_name in self.ignored_updaters:
-                continue
-            value = partition[updater_name]
-            if isinstance(value, dict):
-                data[updater_name] = {str(k): v for k, v in sorted(value.items())}
-            else:
-                data[updater_name] = value
-        return data

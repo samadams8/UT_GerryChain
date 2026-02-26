@@ -1,28 +1,87 @@
 import os
 import json
 import yaml
-import geopandas as gpd
-import maup
 from typing import Optional, Dict, Any, List, Callable, Union
 
-from gerrychain import Partition, GeographicPartition
+from gerrychain import Partition
 
 from .configuration import ConfigurationManager
+from .geography import GeographyManager
 from . import run_utils as rutil
 from .preconditioning import precondition as run_precondition
 from .chain import create_partition_iterator
 from .optimization import LexicographicOptimizer
 
+
 class EnsembleRunner:
-    def __init__(self, config_manager: ConfigurationManager):
+    def __init__(
+        self,
+        config_manager: ConfigurationManager,
+        geography: GeographyManager,
+        dataset_key: str,
+    ):
+        """
+        Parameters
+        ----------
+        config_manager : ConfigurationManager
+            Configuration for constraints, updaters, proposals, etc.
+        geography : GeographyManager
+            Geography manager providing graphs/partitions by dataset key.
+        dataset_key : str
+            Key of the dataset in the geography manager to use for this run.
+        """
         self.config = config_manager
+        self.geography = geography
+        self.dataset_key = dataset_key
         self.preconditioned_partition = None
-        self.callbacks = {}
+        self.callbacks: Dict[str, Dict[str, Any]] = {}
 
     @classmethod
-    def from_config(cls, config_path: str) -> 'EnsembleRunner':
+    def from_run_directory(cls, run_dir: str) -> "EnsembleRunner":
+        """
+        Reconstruct an EnsembleRunner from a run directory saved by run().
+
+        Expects:
+        - config.yaml: configuration-only file written by ConfigurationManager.to_config()
+        - run_metadata.yaml: run metadata including a 'geography' section with crs,
+          datasets (key -> pop_geodata_path, plan_geodata_path), and default_dataset.
+        """
+        config_path = os.path.join(run_dir, "config.yaml")
+        metadata_path = os.path.join(run_dir, "run_metadata.yaml")
+
         config = ConfigurationManager.from_config(config_path)
-        return cls(config)
+
+        if not os.path.exists(metadata_path):
+            raise FileNotFoundError(f"Run metadata file not found: {metadata_path}")
+
+        with open(metadata_path, "r") as f:
+            metadata = yaml.safe_load(f) or {}
+
+        geography_section = metadata.get("geography", {})
+        if not isinstance(geography_section, dict) or not geography_section:
+            raise ValueError("Run metadata does not contain a valid 'geography' section.")
+
+        datasets_config = geography_section.get("datasets", {})
+        crs = geography_section.get("crs", "EPSG:26912")
+
+        geo = GeographyManager(crs=crs)
+        for key, spec in datasets_config.items():
+            if not isinstance(spec, dict):
+                continue
+            p1 = spec.get("pop_geodata_path")
+            p2 = spec.get("plan_geodata_path")
+            if p1:
+                geo.register_pop_dataset(key, p1)
+            if p2:
+                geo.register_plan_dataset(key, p2)
+
+        dataset_key = geography_section.get("default_dataset")
+        if not dataset_key and geo.list_keys():
+            dataset_key = geo.list_keys()[0]
+        if not dataset_key:
+            raise ValueError("No dataset_key found in geography metadata or datasets.")
+
+        return cls(config, geo, dataset_key)
 
     def add_runtime_callback(self,
         name: str,
@@ -53,7 +112,14 @@ class EnsembleRunner:
             "max_attempts": max_attempts,
         }
 
-        initial_partition = self.config.initial_partition
+        initial_partition = self.geography.build_partition(
+            self.dataset_key,
+            self.dataset_key,
+            updaters=self.config.updaters,
+            repair_contiguity=True,
+        )
+        # Configure population params for this dataset.
+        self.config.set_population_from_partition(initial_partition)
         proposal = self.config.proposal(initial_partition)
 
         self.preconditioned_partition = run_precondition(
@@ -62,7 +128,7 @@ class EnsembleRunner:
             constraints=self.config.constraints,
             constraint_params=self.config.constraint_params,
             population_params=self.config.population_params,
-            graph=self.config.graph,
+            graph=self.geography.get_graph(self.dataset_key, self.dataset_key),
             updaters=self.config.updaters,
             steps=steps,
             max_attempts=max_attempts,
@@ -125,7 +191,15 @@ class EnsembleRunner:
                 raise ValueError("Preconditioned partition not found. Please run .precondition() first or set use_preconditioned_partition to False.")
             initial_partition = self.preconditioned_partition
         else:
-            initial_partition = self.config.initial_partition
+            initial_partition = self.geography.build_partition(
+                self.dataset_key,
+                self.dataset_key,
+                updaters=self.config.updaters,
+                repair_contiguity=True,
+            )
+
+        # Ensure population parameters are configured for this partition.
+        self.config.set_population_from_partition(initial_partition)
         
         proposal = self.config.proposal(initial_partition)
 
@@ -140,10 +214,20 @@ class EnsembleRunner:
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
 
-        # Save run configuration
-        # This will be slightly different now
+        # Save configuration (config-only) and run metadata (including geography).
+        if save_dir is None:
+            save_dir = output_dir or "."
+
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Configuration-only file for ConfigurationManager.from_config
+        config_out_path = os.path.join(save_dir, "config.yaml")
+        self.config.to_config(config_out_path)
+
+        # Run metadata including geography and run params
         metadata = {
             "initialization": self.config.init_params,
+            "geography": self.geography.get_geography_config(default_dataset=self.dataset_key),
             "population": self.config.population_params,
             "region_surcharges": self.config.region_surcharges,
             "edge_penalties": self.config.edge_penalty_params,
@@ -167,7 +251,7 @@ class EnsembleRunner:
             "construction": self.config.construction_history,
         }
 
-        with open(os.path.join(save_dir, "config.yaml"), "w") as f:
+        with open(os.path.join(save_dir, "run_metadata.yaml"), "w") as f:
             yaml.safe_dump(metadata, f, sort_keys=False)
         
         output_file = os.path.join(save_dir, "output.jsonl")
@@ -206,35 +290,14 @@ class EnsembleRunner:
         output_file_handle.close()
 
     def compute_metrics_for_map(self, shapefile_path: str) -> Dict[str, Any]:
-        user_map = gpd.read_file(shapefile_path)
-        
-        if self.config.geodata.crs != user_map.crs:
-            user_map = user_map.to_crs(self.config.geodata.crs)
-        
-        geodata_copy = self.config.geodata.copy()
-        geodata_copy['user_assignment'] = maup.assign(geodata_copy, user_map)
-        
-        for node in self.config.graph.nodes:
-            if node in geodata_copy.index:
-                self.config.graph.nodes[node]['user_assignment'] = geodata_copy.loc[node, 'user_assignment']
-        
-        partition = GeographicPartition(
-            self.config.graph,
-            assignment="user_assignment",
-            updaters=self.config.updaters
+        """
+        Compute updater values for a user-provided map (shapefile) using the
+        active geography and the runner's configuration updaters.
+        """
+        return self.geography.compute_metrics_for_map(
+            shapefile_path,
+            self.dataset_key,
+            self.dataset_key,
+            updaters=self.config.updaters,
+            ignored_updaters=self.config.ignored_updaters,
         )
-        
-        data = {}
-        for updater_name in self.config.updaters.keys():
-            if updater_name in self.config.ignored_updaters:
-                continue
-
-            value = partition[updater_name]
-            if isinstance(value, dict):
-                data[updater_name] = {
-                    str(k): v for k, v in sorted(value.items())
-                }
-            else:
-                data[updater_name] = value
-        
-        return data
