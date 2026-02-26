@@ -17,7 +17,7 @@ from gerrychain.updaters.locality_split_scores import LocalitySplits
 
 import utgc.metrics as utmetrics
 from . import run_utils as rutil
-from .partition_builder import build_initial_partition
+from .geography import build_initial_partition
 from .proposals import create_recom_proposal
 from .optimization import LexicographicOptimizer, OptimizationMetric
 

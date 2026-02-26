@@ -6,7 +6,6 @@ from typing import Optional, Dict, Any, List, Callable, Union
 from gerrychain import Partition
 
 from .configuration import ConfigurationManager
-from .geography import GeographyManager
 from . import run_utils as rutil
 from .preconditioning import precondition as run_precondition
 from .chain import create_partition_iterator
@@ -17,7 +16,7 @@ class EnsembleRunner:
     def __init__(
         self,
         config_manager: ConfigurationManager,
-        geography: GeographyManager,
+        geography: GeographyManager_legacy,
         dataset_key: str,
     ):
         """
@@ -64,7 +63,7 @@ class EnsembleRunner:
         datasets_config = geography_section.get("datasets", {})
         crs = geography_section.get("crs", "EPSG:26912")
 
-        geo = GeographyManager(crs=crs)
+        geo = GeographyManager_legacy(crs=crs)
         for key, spec in datasets_config.items():
             if not isinstance(spec, dict):
                 continue
