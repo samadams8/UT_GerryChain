@@ -34,6 +34,7 @@ class EnsembleRunner:
         self.dataset_key = dataset_key
         self.preconditioned_partition = None
         self.callbacks: Dict[str, Dict[str, Any]] = {}
+        self._precondition_params: Dict[str, Any] = {}
 
     @classmethod
     def from_run_directory(cls, run_dir: str) -> "EnsembleRunner":
@@ -48,7 +49,7 @@ class EnsembleRunner:
         config_path = os.path.join(run_dir, "config.yaml")
         metadata_path = os.path.join(run_dir, "run_metadata.yaml")
 
-        config = ConfigurationManager.from_config(config_path)
+        config = ConfigurationManager.from_config(config_path, verbose=False)
 
         if not os.path.exists(metadata_path):
             raise FileNotFoundError(f"Run metadata file not found: {metadata_path}")
@@ -96,20 +97,34 @@ class EnsembleRunner:
         print(f"Registered callback '{name}' ({action.__name__}) to run every {frequency} steps.")
         return self
 
+    @staticmethod
+    def _constraint_params_from_history(construction_history: List) -> Dict[str, Any]:
+        """Build constraint_params dict from construction_history for precondition."""
+        out: Dict[str, Any] = {}
+        for step in construction_history:
+            if step.get("method") == "constrain_region_splits":
+                kwargs = step.get("kwargs") or {}
+                name = kwargs.get("name") or kwargs.get("column_id") or "unknown"
+                if kwargs.get("num_split") is not None:
+                    out[f"split_{name}"] = kwargs["num_split"]
+                if kwargs.get("num_multi_splits") is not None:
+                    out[f"{name}_multi_splits"] = kwargs["num_multi_splits"]
+            elif step.get("method") == "constrain_not_equal":
+                out["not_equal_constraint"] = (step.get("kwargs") or {}).get("not_equal_constraint", True)
+        return out
+
     # --- Preconditioning ---
     def precondition(self,
         steps: int = 50,
         max_attempts: int = 1,
-    ) -> 'EnsembleRunner':
+        pop_tolerance: float = 0.01,
+    ) -> "EnsembleRunner":
         print("=== Preconditioning ===")
         if self.preconditioned_partition:
             print("Preconditioning has already been run. Overwriting preconditioned partition.")
             self.preconditioned_partition = None
 
-        self.config.precondition_params = {
-            "steps": steps,
-            "max_attempts": max_attempts,
-        }
+        self._precondition_params = {"steps": steps, "max_attempts": max_attempts}
 
         initial_partition = self.geography.build_partition(
             self.dataset_key,
@@ -117,16 +132,30 @@ class EnsembleRunner:
             updaters=self.config.updaters,
             repair_contiguity=True,
         )
-        # Configure population params for this dataset.
-        self.config.set_population_from_partition(initial_partition)
-        proposal = self.config.proposal(initial_partition)
+        total_pop = sum(initial_partition["population"].values())
+        num_districts = len(initial_partition)
+        ideal_pop = total_pop / num_districts
+        population_params = {
+            "ideal_pop": ideal_pop,
+            "pop_tolerance": pop_tolerance,
+            "column_id": self.config.population_params["column_id"],
+            "num_districts": num_districts,
+            "total_pop": total_pop,
+        }
+        proposal = self.config.proposal(
+            initial_partition,
+            total_population=total_pop,
+            num_districts=num_districts,
+            pop_tolerance=pop_tolerance,
+        )
+        constraint_params = self._constraint_params_from_history(self.config.construction_history)
 
         self.preconditioned_partition = run_precondition(
             initial_partition=initial_partition,
             proposal=proposal,
             constraints=self.config.constraints,
-            constraint_params=self.config.constraint_params,
-            population_params=self.config.population_params,
+            constraint_params=constraint_params,
+            population_params=population_params,
             graph=self.geography.get_graph(self.dataset_key, self.dataset_key),
             updaters=self.config.updaters,
             steps=steps,
@@ -137,35 +166,36 @@ class EnsembleRunner:
 
     # --- Internal Run Helper Methods ---
     def _lexicographic_optimize(self, partition: Partition) -> Partition:
-        if not self.config.lex_metrics:
+        """Lexicographic polish: config no longer holds lex params; use getattr for backward compat."""
+        lex_metrics = getattr(self.config, "lex_metrics", None)
+        if not lex_metrics:
             return partition
-
         active_constraints = [c for c in self.config.constraints if not isinstance(c, rutil.NotEqual)]
-        
+        total_pop = sum(partition["population"].values())
+        num_districts = len(partition)
+        proposal = self.config.proposal(
+            partition, total_population=total_pop, num_districts=num_districts, pop_tolerance=0.01
+        )
         optimizer = LexicographicOptimizer(
-            proposal=self.config.proposal(partition), # Re-using standard proposal, or maybe random flip? Original used propose_random_flip but that's imported from gerrychain? 
-            # Original: proposal=propose_random_flip.  Need to import it if we want it.
-            # But wait, original code was: proposal=propose_random_flip
-            # I should verify if I need to import that.
+            proposal=proposal,
             constraints=active_constraints,
             initial_state=partition,
-            metrics=self.config.lex_metrics
+            metrics=lex_metrics,
         )
-        # Note: I need to ensure propose_random_flip is available or use config's proposal. 
-        # Usually for polishing/local search, random flip is better than ReCom. 
-        # I'll check imports.
-
         from collections import deque
+
+        burst_lengths = getattr(self.config, "lex_burst_lengths", [50])
+        num_bursts = getattr(self.config, "lex_num_bursts", [10])
+        preopt_limit = getattr(self.config, "lex_preoptimization_limit", 0)
         deque(
             optimizer.sequential_short_bursts(
-                burst_lengths=self.config.lex_burst_lengths,
-                num_bursts=self.config.lex_num_bursts,
-                preoptimization_limit=self.config.lex_preoptimization_limit,
-                verbose=True
+                burst_lengths=burst_lengths,
+                num_bursts=num_bursts,
+                preoptimization_limit=preopt_limit,
+                verbose=True,
             ),
-            maxlen=0
+            maxlen=0,
         )
-        
         return optimizer.best_part
 
     # --- Run Execution ---
@@ -197,16 +227,21 @@ class EnsembleRunner:
                 repair_contiguity=True,
             )
 
-        # Ensure population parameters are configured for this partition.
-        self.config.set_population_from_partition(initial_partition)
-        
-        proposal = self.config.proposal(initial_partition)
+        total_pop = sum(initial_partition["population"].values())
+        num_districts = len(initial_partition)
+        proposal = self.config.proposal(
+            initial_partition,
+            total_population=total_pop,
+            num_districts=num_districts,
+            pop_tolerance=0.01,
+        )
+        optimization_scheme_params = getattr(self.config, "optimization_scheme_params", None) or {"scheme": "neutral"}
 
         partition_iterator = create_partition_iterator(
             proposal=proposal,
             initial_partition=initial_partition,
             constraints=self.config.constraints,
-            optimization_scheme_params=self.config.optimization_scheme_params,
+            optimization_scheme_params=optimization_scheme_params,
             num_steps=num_steps,
         )
 
@@ -223,29 +258,29 @@ class EnsembleRunner:
         config_out_path = os.path.join(save_dir, "config.yaml")
         self.config.to_config(config_out_path)
 
-        # Run metadata including geography and run params
+        total_pop = sum(initial_partition["population"].values())
+        num_districts = len(initial_partition)
+        ideal_pop = total_pop / num_districts
+        population_snapshot = {
+            **self.config.population_params,
+            "total_pop": total_pop,
+            "num_districts": num_districts,
+            "ideal_pop": ideal_pop,
+        }
+        constraint_params = self._constraint_params_from_history(self.config.construction_history)
         metadata = {
-            "initialization": self.config.init_params,
+            "initialization": {},
             "geography": self.geography.get_geography_config(default_dataset=self.dataset_key),
-            "population": self.config.population_params,
+            "population": population_snapshot,
             "region_surcharges": self.config.region_surcharges,
-            "edge_penalties": self.config.edge_penalty_params,
-            "optimization_scheme": self.config.optimization_scheme_params,
             "updater_names": list(self.config.updaters.keys()),
-            "ignored_updaters": list(self.config.ignored_updaters),
-            "constraints": self.config.constraint_params,
+            "constraints": constraint_params,
             "callback_names": list(self.callbacks.keys()),
             "run": {
                 "num_steps": num_steps,
                 "use_preconditioned_partition": use_preconditioned_partition,
-                # "preconditioning": self.config.precondition_params, # If we want to capture this, we need to store it
+                "preconditioning": self._precondition_params,
                 "lexicographic_polish": lexicographic_polish,
-                "lexicographic_params": {
-                    "metrics": [str(m) for m in self.config.lex_metrics], # OptimizationMetric likely needs str repr
-                    "burst_lengths": self.config.lex_burst_lengths,
-                    "num_bursts": self.config.lex_num_bursts,
-                    "preoptimization_limit": self.config.lex_preoptimization_limit
-                }
             },
             "construction": self.config.construction_history,
         }
@@ -265,11 +300,8 @@ class EnsembleRunner:
                 else:
                     output_partition = partition
 
-                data = {'step': step_number}
+                data = {"step": step_number}
                 for updater_name in self.config.updaters.keys():
-                    if updater_name in self.config.ignored_updaters:
-                        continue
-
                     value = output_partition[updater_name]
                     if isinstance(value, dict):
                         data[updater_name] = {
@@ -298,5 +330,5 @@ class EnsembleRunner:
             self.dataset_key,
             self.dataset_key,
             updaters=self.config.updaters,
-            ignored_updaters=self.config.ignored_updaters,
+            ignored_updaters=set(),
         )

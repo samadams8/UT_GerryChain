@@ -1,164 +1,80 @@
 import os
-import random
 import yaml
-import json
-from typing import Optional, Dict, Any, List, Callable, Tuple, Literal, Union
+from typing import Optional, Dict, Any, List, Callable, Literal
 from warnings import warn
-from datetime import datetime
-from statistics import mean
 
 import pandas as pd
 import numpy as np
 
-from gerrychain import GeographicPartition, Partition, updaters
+from gerrychain import Partition, updaters
 from gerrychain.constraints import contiguous, UpperBound
 from gerrychain.metrics import polsby_popper
 from gerrychain.updaters.locality_split_scores import LocalitySplits
 
 import utgc.metrics as utmetrics
 from . import run_utils as rutil
-from .geography import build_initial_partition
 from .proposals import create_recom_proposal
-from .optimization import LexicographicOptimizer, OptimizationMetric
+
 
 class ConfigurationManager:
     """
-    Fluent builder for redistricting run setup. Composes graph, partition,
-    proposal, constraints, and updaters for use with GerryChain or EnsembleRunner.
+    Geography-free fluent builder for GerryChain MCMC building blocks.
 
-    **GerryChain inputs (use directly in notebooks):**
-    - ``graph``: GerryChain Graph (typically built from geodata upstream).
-    - ``initial_partition``: Partition / GeographicPartition (repaired for contiguity).
-    - ``proposal(partition)``: ReCom proposal with configured surcharges/penalties.
-    - ``constraints``: List of constraint callables for MarkovChain/optimizers.
+    Provides only what is needed to construct native GerryChain MCMC runs:
+    proposal, constraints, and updaters. Can construct itself from a serialized
+    YAML description. Graph/partition are supplied at runtime by the caller.
+
+    **GerryChain inputs (use directly in notebooks or runner):**
+    - ``proposal(partition, total_population=..., num_districts=..., pop_tolerance=...)``
+    - ``constraints``: List of constraint callables.
     - ``updaters``: Dict of partition updaters.
-    - ``population_params``, ``optimization_scheme_params``, ``lex_metrics``, etc.
     """
 
-    def __init__(
-        self,
-        random_seed: Optional[int] = None,
-        pop_column: Optional[str] = "TOTPOP",
-        pop_tolerance: float = 0.01,
-    ):
-        # Schema/defaults only; geography/graphs are provided by callers.
-        self.init_params = {
-            "pop_column": pop_column,
-            "pop_tolerance": pop_tolerance,
-        }
-        if random_seed is not None:
-            self.init_params["random_seed"] = random_seed
-            random.seed(random_seed)
-            np.random.seed(random_seed)
-
-        self.population_params = {
-            "column_id": pop_column,
-            "pop_tolerance": pop_tolerance,
+    def __init__(self) -> None:
+        """No required arguments. Supply pop_column, population, etc. when needed."""
+        self._verbose = False
+        self.population_params: Dict[str, Any] = {
+            "column_id": "TOTPOP",
             "total_pop": None,
             "num_districts": None,
             "ideal_pop": None,
         }
-
-        self.construction_history = []
-        self.region_surcharges = {}
-        self.edge_penalty_params = {}
-        self.edge_penalties = {}
-        self.constraint_params = {}
-        self.constraints = [contiguous,]
-        self.optimization_scheme_params = {}
-        self.ignored_updaters = set()
-        self.lex_metrics = []
-        self.lex_burst_lengths = []
-        self.lex_num_bursts = []
-        self.lex_preoptimization_limit = 0
-
-        self.updaters = {
-            "population": updaters.Tally(pop_column, alias="population"),
+        self.construction_history: List[Dict[str, Any]] = []
+        self.region_surcharges: Dict[str, float] = {}
+        self.edge_penalties: Dict[tuple, float] = {}
+        self.constraints: List[Callable] = [contiguous]
+        self.updaters: Dict[str, Callable] = {
+            "population": updaters.Tally("TOTPOP", alias="population"),
         }
 
-    def build_initial_partition_from_graph(
-        self,
-        graph,
-        assignment_key: str = "initial_plan",
-        num_districts: Optional[int] = None,
-        repair: bool = True,
-    ) -> Partition:
-        """
-        Build initial partition from a graph (and keys). No geodata required.
-        Use this when you have a graph from GeographyManager or another source.
-        """
-        if num_districts is None:
-            part = GeographicPartition(graph, assignment=assignment_key, updaters=self.updaters)
-            num_districts = len(part)
-        return build_initial_partition(
-            graph,
-            assignment=assignment_key,
-            updaters=self.updaters,
-            num_districts=num_districts,
-            repair=repair,
-        )
+    def _log(self, msg: str) -> None:
+        """Print only when verbose (e.g. when loading one config to confirm)."""
+        if self._verbose:
+            print(msg)
 
-    # Properties
-    @property
-    def pop_tolerance(self) -> float:
-        return self.population_params.get("pop_tolerance", 0.01)
-
-    # --- Configuration Methods ---
-
-    # Population
-    def set_population_from_partition(self, partition: Partition) -> "ConfigurationManager":
-        """
-        Configure population_params and population-related updaters from a partition.
-
-        Expects that the partition's graph has the configured population column.
-        """
-        pop_col = self.population_params["column_id"]
-        total_population = sum(
-            partition.graph.nodes[n].get(pop_col, 0) for n in partition.graph.nodes
-        )
-        num_districts = len(partition)
-        self.population_params["total_pop"] = total_population
-        self.population_params["num_districts"] = num_districts
-        self.population_params["ideal_pop"] = total_population / num_districts
-
-        # Refresh population and pop_dev updaters to use the new ideal_pop.
-        self.updaters["population"] = updaters.Tally(pop_col, alias="population")
-        if "pop_dev" in self.updaters:
-            ideal_pop = self.population_params["ideal_pop"]
-
-            def _pop_dev_refresh(p, target=ideal_pop):
-                return {k: v - target for k, v in p["population"].items()}
-
-            self.updaters["pop_dev"] = _pop_dev_refresh
-
+    def set_pop_column(self, pop_column: str) -> "ConfigurationManager":
+        """Set the population column id used by population updater and locality splits."""
+        self.construction_history.append({"method": "set_pop_column", "kwargs": {"pop_column": pop_column}})
+        self.population_params["column_id"] = pop_column
+        self.updaters["population"] = updaters.Tally(pop_column, alias="population")
         return self
 
-    # Population
-    def set_pop_dev_tolerance(self, tolerance: float = 0.01) -> 'ConfigurationManager':
-        self.construction_history.append({
-            "method": "set_pop_dev_tolerance",
-            "kwargs": { "tolerance": tolerance }
-        })
-
-        self.population_params["pop_tolerance"] = tolerance
-        print(f"Population deviation tolerance: {tolerance:%}")
-        return self
-
-    def add_pop_dev_updater(self, name: str = "pop_dev", ignore_output: bool = True) -> 'ConfigurationManager':
+    def add_pop_dev_updater(self, name: str = "pop_dev", ignore_output: bool = True) -> "ConfigurationManager":
+        """Add population deviation updater. ideal_pop is derived from partition at runtime."""
         self.construction_history.append({
             "method": "add_pop_dev_updater",
-            "kwargs": { "name": name, "ignore_output": ignore_output }
+            "kwargs": {"name": name, "ignore_output": ignore_output},
         })
 
-        def _pop_dev_fn(p, mgr=self):
-            target = mgr.population_params["ideal_pop"]
-            return {k: v - target for k, v in p["population"].items()}
+        def _pop_dev_fn(p: Partition) -> Dict:
+            pop = p["population"]
+            if not pop:
+                return {}
+            ideal = sum(pop.values()) / len(pop)
+            return {k: v - ideal for k, v in pop.items()}
+
         self.updaters[name] = _pop_dev_fn
-        print(f"  Added population deviation updater: '{name}'")
-
-        if ignore_output: 
-            self.ignore_output(name)
-
+        self._log(f"  Added population deviation updater: '{name}'")
         return self
 
     # Constraints
@@ -167,8 +83,8 @@ class ConfigurationManager:
         column_id: Optional[str] = None,
         num_split: Optional[int] = None,
         num_multi_splits: Optional[int] = None,
-        create_updater: bool = True
-    ) -> 'ConfigurationManager':
+        create_updater: bool = True,
+    ) -> "ConfigurationManager":
         self.construction_history.append({
             "method": "constrain_region_splits",
             "kwargs": {
@@ -176,8 +92,8 @@ class ConfigurationManager:
                 "column_id": column_id,
                 "num_split": num_split,
                 "num_multi_splits": num_multi_splits,
-                "create_updater": False, # Captured separately
-            }
+                "create_updater": create_updater,
+            },
         })
 
         if not name:
@@ -186,24 +102,20 @@ class ConfigurationManager:
         if num_split is not None:
             constraint_name = f"split_{name}"
             self.constraints.append(UpperBound(
-                    lambda p, name=constraint_name: p[name],
-                    num_split
-                ))
-            self.constraint_params[constraint_name] = num_split
-            print(f"Constraint: split max {num_split} {name}")
+                lambda p, n=constraint_name: p[n],
+                num_split,
+            ))
+            self._log(f"Constraint: split max {num_split} {name}")
         if num_multi_splits is not None:
             constraint_name = f"{name}_multi_splits"
             self.constraints.append(UpperBound(
-                    lambda p, name=constraint_name: p[name],
-                    num_multi_splits
-                ))
-            self.constraint_params[constraint_name] = num_multi_splits
-            print(f"Constraint: max {num_multi_splits} multi-splits of {name}")
+                lambda p, n=constraint_name: p[n],
+                num_multi_splits,
+            ))
+            self._log(f"Constraint: max {num_multi_splits} multi-splits of {name}")
 
         if create_updater:
-            # Need strict=False or similar potentially if already exists?
-            # actually add_locality_splits_updater checks if updaters exist usually or overwrites.
-            self.add_locality_splits_updater(name=name, column_id=column_id)
+            self.add_locality_splits_updater(name=name, column_id=column_id or "")
 
         return self
 
@@ -211,54 +123,38 @@ class ConfigurationManager:
         not_equal_constraint: bool = True,
         create_updater: bool = True,
         ignore_output: bool = True,
-    ) -> 'ConfigurationManager':
+    ) -> "ConfigurationManager":
         self.construction_history.append({
             "method": "constrain_not_equal",
             "kwargs": {
                 "not_equal_constraint": not_equal_constraint,
                 "create_updater": create_updater,
-                "ignore_output": ignore_output
-            }
+                "ignore_output": ignore_output,
+            },
         })
 
-        self.constraint_params["not_equal_constraint"] = not_equal_constraint
-
-        # Remove existing NotEqual if present (to avoid dups or reset)
         self.constraints = [c for c in self.constraints if not isinstance(c, rutil.NotEqual)]
 
         if not_equal_constraint:
             self.constraints.append(rutil.NotEqual())
-            print(f"Constraint: prevent same map from being generated twice in a row")
-
+            self._log("Constraint: prevent same map from being generated twice in a row")
             if create_updater and "assignment_hash" not in self.updaters:
                 self.updaters["assignment_hash"] = rutil._assignment_hash
-                print(f"  Added 'assignment_hash' updater")
-                if ignore_output:
-                    self.ignore_output("assignment_hash")
+                self._log("  Added 'assignment_hash' updater")
         else:
-            print(f"Constraint: allow same map to be generated twice in a row")
-        
+            self._log("Constraint: allow same map to be generated twice in a row")
         return self
 
     # Region surcharges
-    def surcharge_region(self,
-        column_id: str,
-        surcharge: float,
-    ) -> 'ConfigurationManager':
+    def surcharge_region(self, column_id: str, surcharge: float) -> "ConfigurationManager":
         if surcharge <= 0:
             return self
-
         self.construction_history.append({
             "method": "surcharge_region",
-            "kwargs": {
-                "column_id": column_id,
-                "surcharge": surcharge
-            }
+            "kwargs": {"column_id": column_id, "surcharge": surcharge},
         })
-
         self.region_surcharges[column_id] = surcharge
-        print(f"Surcharge: {surcharge} for {column_id}")
-
+        self._log(f"Surcharge: {surcharge} for {column_id}")
         return self
 
     # Edge penalties
@@ -266,46 +162,25 @@ class ConfigurationManager:
         csv_path: str,
         penalty: float,
         weight_column: str = "w",
-    ) -> 'ConfigurationManager':
+    ) -> "ConfigurationManager":
         if not os.path.exists(csv_path):
             warn(f"Transitability edge file not found: {csv_path}. Skipping edge penalties.")
             return self
         if penalty <= 0:
             return self
-        
         self.construction_history.append({
             "method": "penalize_edges_from_csv",
-            "kwargs": {
-                "csv_path": csv_path,
-                "penalty": penalty,
-                "weight_column": weight_column,
-            },
+            "kwargs": {"csv_path": csv_path, "penalty": penalty, "weight_column": weight_column},
         })
-
         edges_df = pd.read_csv(csv_path)
-        
-        # Check if the weight column exists
         has_weights = weight_column in edges_df.columns
         if not has_weights:
-            warn(f"Weight column '{weight_column}' not found in {os.path.basename(csv_path)}. Using constant penalty for all edges in file.")
-
+            warn(f"Weight column '{weight_column}' not found in {os.path.basename(csv_path)}. Using constant penalty.")
         for _, row in edges_df.iterrows():
             edge = tuple(sorted((int(row["u"]), int(row["v"]))))
-            
-            if has_weights:
-                edge_weight = row[weight_column] * penalty
-            else:
-                edge_weight = penalty
-
-            if edge in self.edge_penalties:
-                self.edge_penalties[edge] += edge_weight
-            else:
-                self.edge_penalties[edge] = edge_weight
-
-        self.edge_penalty_params[csv_path] = penalty
-
-        print(f"Penalizing edges from {os.path.basename(csv_path)} with factor {penalty}")
-
+            edge_weight = row[weight_column] * penalty if has_weights else penalty
+            self.edge_penalties[edge] = self.edge_penalties.get(edge, 0) + edge_weight
+        self._log(f"Penalizing edges from {os.path.basename(csv_path)} with factor {penalty}")
         return self
 
     # Updaters
@@ -313,20 +188,13 @@ class ConfigurationManager:
         name: Optional[str] = None,
         column_id: str = "",
         ignore_ls_output: bool = True,
-    ) -> 'ConfigurationManager':
+    ) -> "ConfigurationManager":
         self.construction_history.append({
             "method": "add_locality_splits_updater",
-            "kwargs": {
-                "name": name,
-                "column_id": column_id,
-                "ignore_ls_output": ignore_ls_output
-            },
+            "kwargs": {"name": name, "column_id": column_id, "ignore_ls_output": ignore_ls_output},
         })
-
         if not name:
-            # Fallback if column_id is somehow also empty? Though type hint says str.
             name = column_id or "unknown"
-            
         ls_name = f"ls_{name}"
         self.updaters[ls_name] = LocalitySplits(
             name=ls_name,
@@ -334,47 +202,30 @@ class ConfigurationManager:
             pop_col=self.population_params["column_id"],
             scores_to_compute=["num_split_localities", "num_parts"],
         )
-        print(f"  Added locality split updater: '{ls_name}'")
-        if ignore_ls_output:
-            self.ignore_output(ls_name)
-
+        self._log(f"  Added locality split updater: '{ls_name}'")
         sname = f"split_{name}"
         self.updaters[sname] = lambda p, ls=ls_name: p[ls].get("num_split_localities", 0)
-        print(f"  Added split updater: '{sname}'")
-
         msname = f"{name}_multi_splits"
+
         def _multi_splits_fn(p, ls=ls_name, sn=sname, col=column_id):
             num_localities = len(set(dict(p.graph.nodes(data=col)).values()))
             return p[ls].get("num_parts", 0) - p[sn] - num_localities
-        self.updaters[msname] = _multi_splits_fn
-        print(f"  Added multi-split updater: '{msname}'")
 
+        self.updaters[msname] = _multi_splits_fn
+        self._log(f"  Added multi-split updater: '{msname}'")
         return self
 
-    def add_election_updater(
-        self,
+    def add_election_updater(self,
         name: str,
         parties_to_columns: Dict[str, str],
         ignore_output: bool = True,
-    ) -> 'ConfigurationManager':
+    ) -> "ConfigurationManager":
         self.construction_history.append({
             "method": "add_election_updater",
-            "kwargs": {
-                "name": name,
-                "parties_to_columns": parties_to_columns,
-                "ignore_output": ignore_output
-            },
+            "kwargs": {"name": name, "parties_to_columns": parties_to_columns, "ignore_output": ignore_output},
         })
-
-        self.updaters[name] = updaters.Election(
-            name=name,
-            parties_to_columns=parties_to_columns,
-        )
-        print(f"  Added election updater: '{name}'")
-        print(f"    Parties to columns: {parties_to_columns}")
-        if ignore_output:
-            self.ignore_output(name)
-
+        self.updaters[name] = updaters.Election(name=name, parties_to_columns=parties_to_columns)
+        self._log(f"  Added election updater: '{name}'")
         return self
 
     def add_election_updaters(
@@ -422,7 +273,7 @@ class ConfigurationManager:
         parties: List[str] = ["D", "R", "-"],
         ignore_table_output: bool = True,
         ignore_agg_output: bool = True,
-    ) -> 'ConfigurationManager':
+    ) -> "ConfigurationManager":
         self.construction_history.append({
             "method": "add_election_aggregator",
             "kwargs": {
@@ -430,22 +281,12 @@ class ConfigurationManager:
                 "elections": elections,
                 "parties": parties,
                 "ignore_table_output": ignore_table_output,
-                "ignore_agg_output": ignore_agg_output
+                "ignore_agg_output": ignore_agg_output,
             },
         })
-
         self.updaters[f"{name}_table"] = lambda p: utmetrics.tabulate_partisan_data(p, elections, parties)
-        print(f"  Added partisan data tabulator: '{name}_table'")
-
-        if ignore_table_output:
-            self.ignore_output(f"{name}_table")
-
         self.updaters[name] = lambda p: utmetrics.aggregate_partisan_metrics(p[f"{name}_table"])
-        print(f"  Added partisan data aggregator: '{name}'")
-
-        if ignore_agg_output:
-            self.ignore_output(name)
-
+        self._log(f"  Added partisan data aggregator: '{name}'")
         return self
 
     def add_election_metric_updaters(self,
@@ -484,245 +325,123 @@ class ConfigurationManager:
                 self.updaters[mname] = lambda p, an=aggregator_name: utmetrics.majority_seats(p[an])
             else:
                 raise ValueError(f"Unknown election metric: '{metric}'")
-            print(f"  Added election metric updater: '{mname}'")
-
+            self._log(f"  Added election metric updater: '{mname}'")
         return self
 
-    def add_updater_function(self,
-        name: str,
-        function: Callable[[Partition], Any]
-    ) -> 'ConfigurationManager':
+    def add_updater_function(self, name: str, function: Callable[[Partition], Any]) -> "ConfigurationManager":
         if isinstance(function, str):
-            print(f"!!! Updater function '{name} ({function})' is a string. Please use .add_updater_function() to add this function manually.")
+            self._log(f"!!! Updater function '{name}' is a string. Add the callable manually.")
             return self
-
         self.construction_history.append({
             "method": "add_updater_function",
-            "kwargs": {
-                "name": name,
-                "function": function.__name__,
-            },
+            "kwargs": {"name": name, "function": function.__name__},
         })
-
         return self._add_updater_function(name=name, function=function)
 
     def _add_updater_function(self,
         name: str,
         function: Callable[[Partition], Any],
         ignore_output: bool = False,
-    ) -> 'ConfigurationManager':
+    ) -> "ConfigurationManager":
         if name in self.updaters:
-            print(f"Updater function '{name}' already exists. Overwriting...")
-        
+            self._log(f"Updater function '{name}' already exists. Overwriting...")
         self.updaters[name] = function
-        print(f"  Added updater function: '{name}'")
-
-        if ignore_output: 
-            self.ignore_output(name)
-
-        return self
-
-    def ignore_output(self, name: str) -> 'ConfigurationManager':
-        self.ignored_updaters.add(name)
-        print(f"    Ignoring updater in output: '{name}'")
+        self._log(f"  Added updater function: '{name}'")
         return self
 
     # Shape metrics
-    def add_shape_metrics(self, metrics: List[str]) -> 'ConfigurationManager':
-        self.construction_history.append({
-            "method": "add_shape_metrics",
-            "kwargs": {
-                "metrics": metrics,
-            }
-        })
-
+    def add_shape_metrics(self, metrics: List[str]) -> "ConfigurationManager":
+        self.construction_history.append({"method": "add_shape_metrics", "kwargs": {"metrics": metrics}})
         for metric in metrics:
             if metric not in self.updaters:
                 if metric == "polsby_popper":
                     if "perimeter" not in self.updaters:
-                        self._add_updater_function("perimeter", updaters.perimeter, ignore_output=True)
+                        self._add_updater_function("perimeter", updaters.perimeter)
                     if "area" not in self.updaters:
-                         self._add_updater_function("area", updaters.Tally("area", alias="area"), ignore_output=True)
+                        self._add_updater_function("area", updaters.Tally("area", alias="area"))
                     if "polsby_popper" not in self.updaters:
                         self._add_updater_function("polsby_popper", polsby_popper)
                 elif metric == "reock_score":
                     self._add_updater_function("reock_score", rutil._reock_score)
-                    print(f"  Added Reock score shape metric")
+                    self._log("  Added Reock score shape metric")
                 else:
                     raise ValueError(f"Unknown shape metric: '{metric}'")
-
-        return self
-
-    # Optimization
-    def add_optimization_scheme(self,
-        scheme: str,
-        updater: str,
-        **kwargs
-    ) -> 'ConfigurationManager':
-        self.construction_history.append({
-            "method": "add_optimization_scheme",
-            "kwargs": {
-                "scheme": scheme,
-                "updater": updater,
-                **kwargs
-            }
-        })
-
-        if scheme not in ["neutral", "tilted", "short_bursts"]:
-            raise ValueError(f"Unknown optimization scheme: '{scheme}'. Options: 'neutral', 'tilted', 'short_bursts'")
-
-        if updater not in self.updaters:
-            raise ValueError(f"Updater '{updater}' not found. Must be added to the runner first.")
-
-        self.optimization_scheme_params = {
-            "scheme": scheme,
-            "updater": updater,
-            **kwargs
-        }
-        print(f"Optimization scheme: {scheme}")
-        if kwargs:
-            print(f"  Parameters: {kwargs}")
-
-        return self
-
-    def add_lexicographic_metric(self,
-        score_updater: str,
-        reduce: Optional[Literal["sum", "max", "min", "mean", "L1", "L2", "absmax", "absmin"]] = None,
-        maximize: bool = False,
-        optimal_bound: Optional[float] = None,
-        acceptance_threshold: Optional[float] = None,
-        is_inclusive: bool = False,
-        tolerance: float = 1e-6,
-        burst_length: int = 50,
-        num_bursts: int = 10,
-    ) -> 'ConfigurationManager':
-        self.construction_history.append({
-            "method": "add_lexicographic_metric",
-            "kwargs": {
-                "score_updater": score_updater,
-                "reduce": reduce,
-                "maximize": maximize,
-                "optimal_bound": optimal_bound,
-                "acceptance_threshold": acceptance_threshold,
-                "is_inclusive": is_inclusive,
-                "tolerance": tolerance,
-                "burst_length": burst_length,
-                "num_bursts": num_bursts,
-            }
-        })
-
-        if score_updater not in self.updaters:
-            warn(f"Lexicographic metric optimization requires an updater '{score_updater}', but it was not found.")
-
-        def reduce_fn(value, reduction):
-            if reduction is None:
-                return value
-            
-            if isinstance(value, dict):
-                v = list(value.values())
-            elif isinstance(value, tuple):
-                v = list(value)
-            elif isinstance(value, np.ndarray):
-                v = value.tolist()
-            else:
-                v = value
-        
-            if reduction == "min":
-                return min(v)
-            elif reduction == "max":
-                return max(v)
-            elif reduction == "absmax":
-                return max([abs(t) for t in v])
-            elif reduction == "absmin":
-                return min([abs(t) for t in v])
-            elif reduction == "sum":
-                return sum(v)
-            elif reduction == "mean":
-                return mean(v)
-            elif reduction == "L1":
-                return sum(abs(v))
-            elif reduction == "L2":
-                return sum([t**2 for t in v])**0.5
-            else:
-                raise ValueError(f"Unknown reduction '{reduction}'.")
-
-        self.lex_metrics.append(
-            OptimizationMetric(
-                lambda p: reduce_fn(p[score_updater], reduce),
-                maximize,
-                optimal_bound,
-                acceptance_threshold,
-                is_inclusive,
-                tolerance
-            )
-        )
-        self.lex_burst_lengths.append(burst_length)
-        self.lex_num_bursts.append(num_bursts)
-
-        print(f"Added lexicographic optimization metric '{score_updater}'")
-        return self
-
-    def add_lexicographic_preoptimization(self, limit: int = 10000) -> 'ConfigurationManager':
-        self.construction_history.append({
-            "method": "add_lexicographic_preoptimization",
-            "kwargs": {
-                "limit": limit,
-            }
-        })
-        self.lex_preoptimization_limit = limit
         return self
 
     # --- Proposal Creation ---
-    def proposal(self, initial_partition: Partition) -> Callable[[Partition], Partition]:
+    def proposal(self,
+        initial_partition: Partition,
+        total_population: Optional[float] = None,
+        num_districts: Optional[int] = None,
+        pop_tolerance: float = 0.01,
+    ) -> Callable[[Partition], Partition]:
         """
-        Create a ReCom proposal for a given initial partition.
+        Create a ReCom proposal. Population and tolerance are supplied at call time.
 
-        Requires that population_params (including ideal_pop) have been
-        configured, e.g. via set_population_from_partition(initial_partition).
+        Parameters
+        ----------
+        initial_partition : Partition
+            Current partition (used for num_districts if num_districts not given).
+        total_population : float, optional
+            Total population (required unless already set on config).
+        num_districts : int, optional
+            Number of districts (defaults to len(initial_partition)).
+        pop_tolerance : float, optional
+            Population deviation tolerance (epsilon) for ReCom.
+
+        Returns
+        -------
+        callable
+            A proposal function (partition) -> partition.
         """
-        if self.population_params.get("ideal_pop") is None:
-            raise RuntimeError(
-                "population_params['ideal_pop'] is not set. "
-                "Call set_population_from_partition(initial_partition) before proposal()."
-            )
-        num_districts = len(initial_partition)
+        num_d = num_districts if num_districts is not None else len(initial_partition)
+        if total_population is None:
+            raise ValueError("proposal() requires total_population=... at call time.")
+        ideal_pop = total_population / num_d
+        population_params = {
+            "column_id": self.population_params["column_id"],
+            "ideal_pop": ideal_pop,
+            "num_districts": num_d,
+            "total_pop": total_population,
+            "pop_tolerance": pop_tolerance,
+        }
         return create_recom_proposal(
-            self.population_params,
+            population_params,
             self.region_surcharges,
             self.edge_penalties,
-            num_districts=num_districts,
-            pop_tolerance=self.pop_tolerance,
+            num_districts=num_d,
+            pop_tolerance=pop_tolerance,
         )
 
     def to_config(self, config_path: str) -> None:
-        """
-        Write a configuration-only YAML file that can be loaded with from_config().
-        """
+        """Write a configuration-only YAML file that can be loaded with from_config()."""
         data: Dict[str, Any] = {
-            "initialization": dict(self.init_params),
+            "initialization": {},
             "construction": list(self.construction_history),
         }
         with open(config_path, "w") as f:
             yaml.safe_dump(data, f, sort_keys=False)
 
     @classmethod
-    def from_config(cls, config_path: str) -> 'ConfigurationManager':
+    def from_config(cls, config_path: str, verbose: bool = False) -> "ConfigurationManager":
         """
         Construct a ConfigurationManager from a configuration-only YAML file.
 
-        The file is expected to contain:
-        - initialization: schema defaults (pop_column, pop_tolerance, random_seed)
-        - construction: list of {method, kwargs} entries
+        Parameters
+        ----------
+        config_path : str
+            Path to the YAML file.
+        verbose : bool, optional
+            If True, log when replaying construction steps. Default False for bulk deserialization.
 
-        Geography and run metadata are not loaded here.
+        Returns
+        -------
+        ConfigurationManager
         """
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
-
         with open(config_path, "r") as f:
             config_data = yaml.safe_load(f) or {}
-
-        init_section = config_data.get("initialization", {})
         config_dir = os.path.dirname(os.path.abspath(config_path))
 
         def resolve_path(path: Optional[str]) -> Optional[str]:
@@ -730,44 +449,38 @@ class ConfigurationManager:
                 return path
             if os.path.exists(path):
                 return path
-            rel_path = os.path.join(config_dir, path)
-            if os.path.exists(rel_path):
-                return rel_path
-            root_path = os.path.join(config_dir, "../../..", path)
-            if os.path.exists(root_path):
-                return os.path.abspath(root_path)
+            rel = os.path.join(config_dir, path)
+            if os.path.exists(rel):
+                return rel
+            root = os.path.join(config_dir, "../../..", path)
+            if os.path.exists(root):
+                return os.path.abspath(root)
             return path
 
-        init_kwargs = {
-            "pop_column": init_section.get("pop_column", "TOTPOP"),
-            "pop_tolerance": init_section.get("pop_tolerance", 0.01),
-        }
-        if "random_seed" in init_section:
-            init_kwargs["random_seed"] = init_section["random_seed"]
-
-        try:
-            instance = cls(**init_kwargs)
-        except TypeError as e:
-            raise ValueError(f"Error creating ConfigurationManager with params {init_kwargs}: {e}")
+        instance = cls()
+        instance._verbose = verbose
+        init_section = config_data.get("initialization", {})
+        if init_section.get("pop_column"):
+            instance.set_pop_column(init_section["pop_column"])
 
         construction_history = config_data.get("construction", [])
+        skip_methods = {"add_optimization_scheme", "add_lexicographic_metric", "add_lexicographic_preoptimization",
+                       "set_pop_dev_tolerance", "set_population_from_partition", "build_initial_partition_from_graph", "ignore_output"}
         for step in construction_history:
             method_name = step.get("method")
-            kwargs = step.get("kwargs", {}) or {}
-
-            if not isinstance(method_name, str):
+            kwargs = dict(step.get("kwargs") or {})
+            if not isinstance(method_name, str) or method_name in skip_methods:
                 continue
-
-            if hasattr(instance, method_name):
-                method = getattr(instance, method_name)
-                # Handle potential path arguments in kwargs (e.g. edge penalties)
-                if "csv_path" in kwargs:
-                    kwargs["csv_path"] = resolve_path(kwargs["csv_path"])
-                try:
-                    method(**kwargs)
-                except Exception as e:
-                    print(f"Warning: Failed to replay configuration method '{method_name}': {e}")
-            else:
-                print(f"Warning: Method '{method_name}' not found on ConfigurationManager. Skipping.")
-
+            if not hasattr(instance, method_name):
+                if verbose:
+                    print(f"Warning: Method '{method_name}' not found. Skipping.")
+                continue
+            method = getattr(instance, method_name)
+            if "csv_path" in kwargs:
+                kwargs["csv_path"] = resolve_path(kwargs["csv_path"])
+            try:
+                method(**kwargs)
+            except Exception as e:
+                if verbose:
+                    print(f"Warning: Failed to replay '{method_name}': {e}")
         return instance
