@@ -59,6 +59,7 @@ from utgc.configuration import ConfigurationManager
 from utgc.optimization import LexicographicOptimizer, OptimizationMetric
 from utgc.preconditioning import precondition
 import utgc.plotting as gcplt
+from utgc.notebookhelper import load_boundaries_from_shapefiles
 
 # =============================================================================
 # Configuration — change this section for different map types
@@ -549,6 +550,8 @@ def render_map(
     step: int,
     output_dir: str,
     subdir: str = "maps",
+    municipalities: Optional[gpd.GeoDataFrame] = None,
+    counties: Optional[gpd.GeoDataFrame] = None,
 ):
     """Render partition with full state + Wasatch Front zoom."""
     maps_dir = os.path.join(output_dir, subdir)
@@ -564,6 +567,9 @@ def render_map(
             partition["split_county"]
             if "split_county" in partition.updaters else None
         ),
+        municipalities=municipalities,
+        counties=counties,
+        auto_load_boundaries=False if (municipalities is not None or counties is not None) else True,
     )
 
 
@@ -646,6 +652,10 @@ async def main():
     # Fill empty IDs on blocks for locality splits
     geo.fill_empty_ids("blocks", ["MUNIID"])
 
+    # Load boundaries once to avoid reloading during map generation
+    print("Loading municipality and county boundaries...")
+    municipalities, counties = load_boundaries_from_shapefiles("data/bounds")
+
     # ------------------------------------------------------------------
     # Phase 1: Coarse ReCom chain (Initialization)
     # ------------------------------------------------------------------
@@ -680,7 +690,7 @@ async def main():
     first_coarse_step, first_coarse_part = next(coarse_generator)
     
     # Save the first coarse map
-    render_map(first_coarse_part, first_coarse_step, output_dir, subdir="maps/coarse")
+    render_map(first_coarse_part, first_coarse_step, output_dir, subdir="maps/coarse", municipalities=municipalities, counties=counties)
 
     first_blocks_partition = transfer_to_blocks(
         geo, first_coarse_part, "d4-cap", "blocks", blocks_opt_updaters
@@ -748,7 +758,7 @@ async def main():
             step_seq = generated_coarse
             
             c_step, c_part = next(coarse_generator)
-            render_map(c_part, c_step, output_dir, subdir="maps/coarse")
+            render_map(c_part, c_step, output_dir, subdir="maps/coarse", municipalities=municipalities, counties=counties)
             
             b_part = transfer_to_blocks(
                 geo, c_part, "d4-cap", "blocks", blocks_opt_updaters
@@ -779,7 +789,7 @@ async def main():
                             assignment=opt_assignment,
                             updaters=full_updaters,
                         )
-                        render_map(full_partition, step_num, output_dir)
+                        render_map(full_partition, step_num, output_dir, municipalities=municipalities, counties=counties)
                         
                         metrics = collect_metrics(full_partition, step_num, updater_names)
                         metrics["optimization_score"] = score
