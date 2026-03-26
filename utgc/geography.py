@@ -390,6 +390,87 @@ class GeographyManager:
                 new_ids = np.arange(max_id + 1, max_id + 1 + int(n_need))
                 gdf.loc[need_id, col] = new_ids
 
+    def build_election_dicts(
+        self,
+        pop_key: str,
+        years: List[int],
+        offices: List[str],
+        parties: List[str] = ["D", "R", "-"],
+        overrides: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Dict[str, str]]:
+        """
+        Build ``{election_name: {party_label: column_name}}`` dicts for
+        ``ConfigurationManager.add_election_updaters()``.
+
+        Uses ``get_election_columns()`` for column discovery, then groups
+        columns by election and maps party initials to labels.
+
+        Parameters
+        ----------
+        pop_key : str
+            Key of the population dataset to inspect for election columns.
+        years : list of int
+            Years to include (e.g. ``[2016, 2020, 2024]``).
+        offices : list of str
+            Three-character office codes to include (e.g. ``["PRE", "GOV"]``).
+        parties : list of str, optional
+            Party labels to retain. Default ``["D", "R", "-"]``.
+        overrides : dict, optional
+            Mapping of ``election_name -> {party_label: column_name}`` to
+            apply after auto-discovery. Override entries are merged (not
+            replaced) into the discovered mapping.
+
+        Returns
+        -------
+        dict
+            ``{election_name: {party_label: column_name}}`` suitable for
+            ``ConfigurationManager.add_election_updaters(elections=...)``.
+
+        Notes
+        -----
+        Column naming convention: ``G{YY}{OFFICE}{PARTY_INITIAL}{LASTNAME}``
+        Party initial at position 6: ``D`` → Democratic, ``R`` → Republican,
+        anything else → ``"-"`` (other/third party).
+        """
+        overrides = overrides or {}
+        columns = self.get_election_columns(pop_key, years=years, offices=offices)
+
+        elections: Dict[str, Dict[str, str]] = {}
+
+        for col in columns:
+            if len(col) < 7:
+                continue
+            year = int(col[1:3]) + 2000
+            office = col[3:6]
+            election_name = f"{year}{office}"
+            party_char = col[6]
+
+            if party_char == "D":
+                party_label = "D"
+            elif party_char == "R":
+                party_label = "R"
+            else:
+                party_label = "-"
+
+            if party_label not in parties:
+                continue
+
+            if election_name not in elections:
+                elections[election_name] = {}
+
+            # Build cumulative label for multi-candidate parties (e.g. R1, R2)
+            existing_for_party = [k for k in elections[election_name] if k.startswith(party_label)]
+            label = f"{party_label}{len(existing_for_party) + 1}"
+            elections[election_name][label] = col
+
+        # Apply overrides (merge, not replace)
+        for election_name, override_mapping in overrides.items():
+            if election_name not in elections:
+                elections[election_name] = {}
+            elections[election_name].update(override_mapping)
+
+        return elections
+
 
 # class GeographyManager_legacy:
 #     """

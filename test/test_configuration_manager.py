@@ -238,5 +238,54 @@ class TestColumnCoordination(unittest.TestCase):
         self.assertIn("ls_muni", config.updaters)
 
 
+class TestGetConstraintParams(unittest.TestCase):
+    """get_constraint_params() derives ceiling dict from construction_history."""
+
+    def test_empty_history_returns_empty_dict(self):
+        config = ConfigurationManager()
+        self.assertEqual(config.get_constraint_params(), {})
+
+    def test_single_split_constraint(self):
+        config = ConfigurationManager()
+        config.set_pop_column("TOTPOP")
+        config.constrain_region_splits(name="muni", column_id="MUNIID", num_split=2)
+        params = config.get_constraint_params()
+        self.assertEqual(params["split_muni"], 2)
+        self.assertNotIn("muni_multi_splits", params)
+
+    def test_split_and_multi_split_constraints(self):
+        config = ConfigurationManager()
+        config.set_pop_column("TOTPOP")
+        config.constrain_region_splits(
+            name="muni", column_id="MUNIID", num_split=2, num_multi_splits=1
+        )
+        params = config.get_constraint_params()
+        self.assertEqual(params["split_muni"], 2)
+        self.assertEqual(params["muni_multi_splits"], 1)
+
+    def test_multiple_region_constraints(self):
+        config = ConfigurationManager()
+        config.set_pop_column("TOTPOP")
+        config.constrain_region_splits(name="muni", column_id="MUNIID", num_split=2)
+        config.constrain_region_splits(name="county", column_id="COUNTYID", num_split=3)
+        params = config.get_constraint_params()
+        self.assertEqual(params["split_muni"], 2)
+        self.assertEqual(params["split_county"], 3)
+
+    def test_not_equal_constraint_included(self):
+        config = ConfigurationManager()
+        config.constrain_not_equal(not_equal_constraint=True, create_updater=True)
+        params = config.get_constraint_params()
+        self.assertIn("not_equal_constraint", params)
+        self.assertTrue(params["not_equal_constraint"])
+
+    def test_surcharges_do_not_appear_in_constraint_params(self):
+        config = ConfigurationManager()
+        config.surcharge_region("MUNIID", 1.0)
+        params = config.get_constraint_params()
+        self.assertNotIn("MUNIID", params)
+        self.assertEqual(params, {})
+
+
 if __name__ == "__main__":
     unittest.main()

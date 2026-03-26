@@ -413,6 +413,34 @@ class ConfigurationManager:
             pop_tolerance=pop_tolerance,
         )
 
+    def get_constraint_params(self) -> Dict[str, Any]:
+        """
+        Derive constraint parameters from the construction history.
+
+        Returns a dict mapping constraint names to their ceiling values,
+        suitable for passing to ``precondition()`` as ``constraint_params``.
+
+        Returns
+        -------
+        dict
+            E.g. ``{"split_muni": 2, "muni_multi_splits": 1,
+            "not_equal_constraint": True}``.
+        """
+        out: Dict[str, Any] = {}
+        for step in self.construction_history:
+            if step.get("method") == "constrain_region_splits":
+                kwargs = step.get("kwargs") or {}
+                name = kwargs.get("name") or kwargs.get("column_id") or "unknown"
+                if kwargs.get("num_split") is not None:
+                    out[f"split_{name}"] = kwargs["num_split"]
+                if kwargs.get("num_multi_splits") is not None:
+                    out[f"{name}_multi_splits"] = kwargs["num_multi_splits"]
+            elif step.get("method") == "constrain_not_equal":
+                out["not_equal_constraint"] = (
+                    step.get("kwargs") or {}
+                ).get("not_equal_constraint", True)
+        return out
+
     def to_config(self, config_path: str) -> None:
         """Write a configuration-only YAML file that can be loaded with from_config()."""
         data: Dict[str, Any] = {

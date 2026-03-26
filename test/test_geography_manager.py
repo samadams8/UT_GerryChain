@@ -408,5 +408,78 @@ class TestGeographyManagerFillEmptyIds(unittest.TestCase):
         self.assertEqual(col.iloc[2], "101")
 
 
+class TestBuildElectionDicts(unittest.TestCase):
+    """build_election_dicts() groups election columns by name and maps party initials."""
+
+    def setUp(self):
+        # Columns: G20PRE D/R, G24GOV D/R/R2, G20GOV D
+        self.path = _minimal_geodata_path(
+            extra_columns={
+                "G20PREDWOO": [100, 200],  # 2020 PRE, D
+                "G20PREROUP": [80, 160],   # 2020 PRE, R
+                "G24GOVDPET": [90, 180],   # 2024 GOV, D
+                "G24GOVRHEN": [70, 140],   # 2024 GOV, R (first)
+                "G24GOVNCLA": [50, 100],   # 2024 GOV, other → "-"
+                "TOTPOP": [1000, 2000],
+            },
+            include_area=True,
+        )
+        self.addCleanup(lambda: os.path.exists(self.path) and os.remove(self.path))
+        self.manager = GeographyManager(pop_data={"k": self.path}, crs="EPSG:26912")
+
+    def test_groups_columns_by_election(self):
+        result = self.manager.build_election_dicts(
+            "k", years=[2020], offices=["PRE"]
+        )
+        self.assertIn("2020PRE", result)
+        election = result["2020PRE"]
+        self.assertIn("D1", election)
+        self.assertIn("R1", election)
+        self.assertEqual(election["D1"], "G20PREDWOO")
+        self.assertEqual(election["R1"], "G20PREROUP")
+
+    def test_multi_candidate_party_gets_sequential_labels(self):
+        result = self.manager.build_election_dicts(
+            "k", years=[2024], offices=["GOV"]
+        )
+        self.assertIn("2024GOV", result)
+        election = result["2024GOV"]
+        # Should have D1 and R1
+        self.assertIn("D1", election)
+        self.assertIn("R1", election)
+
+    def test_party_filter_excludes_unwanted(self):
+        # Only D; R should be absent
+        result = self.manager.build_election_dicts(
+            "k", years=[2020], offices=["PRE"], parties=["D"]
+        )
+        election = result.get("2020PRE", {})
+        keys = list(election.keys())
+        self.assertTrue(all(k.startswith("D") for k in keys))
+
+    def test_overrides_are_merged(self):
+        result = self.manager.build_election_dicts(
+            "k", years=[2024], offices=["GOV"],
+            overrides={"2024GOV": {"R2": "G24GOVNCLA"}},
+        )
+        self.assertIn("R2", result["2024GOV"])
+        self.assertEqual(result["2024GOV"]["R2"], "G24GOVNCLA")
+
+    def test_no_matching_columns_returns_empty(self):
+        result = self.manager.build_election_dicts(
+            "k", years=[1990], offices=["SEN"]
+        )
+        self.assertEqual(result, {})
+
+    def test_override_only_election_created(self):
+        # An election not in geodata but specified in overrides is created
+        result = self.manager.build_election_dicts(
+            "k", years=[2022], offices=["SEN"],
+            overrides={"2022SEN": {"D1": "G22SENDFOO"}},
+        )
+        self.assertIn("2022SEN", result)
+        self.assertEqual(result["2022SEN"]["D1"], "G22SENDFOO")
+
+
 if __name__ == "__main__":
     unittest.main()
