@@ -34,10 +34,11 @@ import random
 import asyncio
 from math import ceil
 from functools import partial
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Iterator
 from datetime import datetime
 
 import numpy as np
+import pandas as pd
 import geopandas as gpd
 from shapely.ops import unary_union
 from networkx.readwrite import json_graph
@@ -88,7 +89,7 @@ random_seed = 1847
 max_workers = 4
 
 # Annealing steps per optimization metric phase
-annealing_steps = 10_000
+annealing_steps = 10000
 
 # Output directory
 output_dir = os.path.join("output", config_tag or datetime.now().strftime("%Y%m%d%H%M%S"))
@@ -270,13 +271,13 @@ def run_coarse_chain(
     cfg: ConfigurationManager,
     plan_path: str,
     coarse_key: str,
-    num_output_steps: int,
     seed: int,
-) -> List[Partition]:
+    max_output_steps: int = 1000,
+) -> Iterator[Tuple[int, Partition]]:
     """
     Run ReCom on the coarse dataset and yield every `spacing`-th partition.
 
-    Returns a list of partitions (one per output step).
+    Returns an iterator yielding (output_step, partition).
     """
     random.seed(seed)
     np.random.seed(seed)
@@ -295,11 +296,11 @@ def run_coarse_chain(
     num_districts = len(partition)
     total_pop = sum(partition["population"].values())
     spacing = compute_recom_spacing(num_districts)
-    total_internal_steps = num_output_steps * spacing
+    total_internal_steps = max_output_steps * spacing
 
     print(f"Coarse chain: {num_districts} districts, "
           f"spacing={spacing} steps/output, "
-          f"total_internal={total_internal_steps}")
+          f"max_internal={total_internal_steps}")
 
     # Build proposal
     proposal = cfg.proposal(
@@ -352,17 +353,14 @@ def run_coarse_chain(
         total_steps=total_internal_steps,
     )
 
-    output_partitions = []
     for i, part in enumerate(chain, 1):
         if i % spacing == 0:
             output_step = i // spacing
-            print(f"  Coarse step {output_step}/{num_output_steps} "
-                  f"(internal step {i}/{total_internal_steps})")
-            output_partitions.append(part)
+            print(f"  Coarse step {output_step} "
+                  f"(internal step {i})")
+            yield output_step, part
         # Free memory
         part.parent = None
-
-    return output_partitions
 
 
 # =============================================================================
@@ -483,35 +481,55 @@ def run_optimization_task(
     initial_absmax = _popdev_absmax(partition)
     print(f"Step {step_num}: Initial max pop dev = {initial_absmax:.1f}")
 
-    # Single-metric optimizer for population deviation
-    smo = SingleMetricOptimizer(
-        proposal=propose_random_flip,
-        constraints=[contiguous],
-        initial_state=partition,
-        optimization_metric=_popdev_absmax,
-        maximize=False,
-    )
+    best_part = partition
+    best_score = initial_absmax
 
+    from gerrychain.optimization import SingleMetricOptimizer
     beta_schedule = SingleMetricOptimizer.linear_jumpcycle_beta_function(
         duration_hot=0,
         duration_cooldown=worker_annealing_steps,
         duration_cold=0,
     )
 
-    best_part = None
-    for i, p in enumerate(smo.simulated_annealing(
-        num_steps=worker_annealing_steps,
-        beta_function=beta_schedule,
-        beta_magnitude=100,
-        with_progress_bar=False,
-    )):
-        if all(abs(v) < 1 for v in p["pop_dev"].values()):
+    def sa_accept(part):
+        if part.parent is None:
+            return True
+        parent_score = _popdev_absmax(part.parent)
+        part_score = _popdev_absmax(part)
+        score_delta = part_score - parent_score # maximize=False
+        
+        step = part["step"] if "step" in part.updaters else (
+            0 if part.parent is None else part.parent.get("step", 0) + 1
+        )
+        beta = beta_schedule(step)
+        
+        exponent = -beta * 100 * score_delta
+        if exponent > 700: # math.exp overflows ~709
+            return True
+        return random.random() < math.exp(exponent)
+
+    # Add step updater
+    if "step" not in partition.updaters:
+        partition.updaters["step"] = lambda p: 0 if p.parent is None else p.parent["step"] + 1
+
+    chain = MarkovChain(
+        proposal=propose_random_flip,
+        constraints=[contiguous],
+        accept=sa_accept,
+        initial_state=partition,
+        total_steps=worker_annealing_steps,
+    )
+
+    for i, p in enumerate(chain):
+        score = _popdev_absmax(p)
+        if score < best_score:
+            best_part = p
+            best_score = score
+        
+        if score < 1.0:
             best_part = p
             print(f"  Step {step_num}: Equal pop achieved at annealing step {i}")
             break
-
-    if best_part is None:
-        best_part = smo.best_part
 
     final_popdev = best_part["pop_dev"]
     final_absmax = max(abs(v) for v in final_popdev.values())
@@ -519,7 +537,7 @@ def run_optimization_task(
 
     # Return optimized assignment so main process can rebuild full partition
     optimized_assignment = dict(best_part.assignment)
-    return step_num, optimized_assignment, dict(final_popdev), smo.best_score
+    return step_num, optimized_assignment, dict(final_popdev), best_score
 
 
 # =============================================================================
@@ -530,9 +548,10 @@ def render_map(
     partition: GeographicPartition,
     step: int,
     output_dir: str,
+    subdir: str = "maps",
 ):
     """Render partition with full state + Wasatch Front zoom."""
-    maps_dir = os.path.join(output_dir, "maps")
+    maps_dir = os.path.join(output_dir, subdir)
     gcplt.visualize_partition(
         partition,
         step,
@@ -558,8 +577,18 @@ def collect_metrics(
     for name in updater_names:
         try:
             value = partition[name]
-            if isinstance(value, dict):
+            # Handle ElectionResults object specifically
+            if hasattr(value, "percents"):
+                data[name] = {
+                    "percents": value.percents("D"),
+                    "counts": value.counts("D"),
+                    "wins": value.wins("D"),
+                    "seats": value.seats("D"),
+                }
+            elif isinstance(value, dict):
                 data[name] = {str(k): v for k, v in sorted(value.items())}
+            elif isinstance(value, pd.DataFrame):
+                data[name] = value.to_dict(orient="records")
             else:
                 data[name] = value
         except Exception:
@@ -618,27 +647,26 @@ async def main():
     geo.fill_empty_ids("blocks", ["MUNIID"])
 
     # ------------------------------------------------------------------
-    # Phase 1: Coarse ReCom chain
+    # Phase 1: Coarse ReCom chain (Initialization)
     # ------------------------------------------------------------------
     print("\n" + "=" * 60)
     print("PHASE 1: Coarse ReCom Chain")
     print("=" * 60)
 
-    coarse_partitions = run_coarse_chain(
+    coarse_generator = run_coarse_chain(
         geo=geo,
         cfg=cfg,
         plan_path=initial_plan,
         coarse_key="d4-cap",
-        num_output_steps=num_output_steps,
         seed=random_seed,
+        max_output_steps=1000, # Large batch max
     )
-    print(f"Generated {len(coarse_partitions)} coarse partitions")
 
     # ------------------------------------------------------------------
-    # Phase 2: Transfer to blocks + parallel optimization
+    # Phase 2: Transfer to blocks + parallel optimization + output
     # ------------------------------------------------------------------
     print("\n" + "=" * 60)
-    print("PHASE 2: Block-Level Optimization")
+    print("PHASE 2 & 3: Parallel Optimization and Progressive Output")
     print("=" * 60)
 
     # Build minimal updaters for the optimization workers (pop only)
@@ -648,9 +676,14 @@ async def main():
     }
 
     # Transfer first partition to get graph data for workers
-    print("Transferring first partition to blocks to prepare worker data...")
+    print("Generating first coarse partition to prepare worker data...")
+    first_coarse_step, first_coarse_part = next(coarse_generator)
+    
+    # Save the first coarse map
+    render_map(first_coarse_part, first_coarse_step, output_dir, subdir="maps/coarse")
+
     first_blocks_partition = transfer_to_blocks(
-        geo, coarse_partitions[0], "d4-cap", "blocks", blocks_opt_updaters
+        geo, first_coarse_part, "d4-cap", "blocks", blocks_opt_updaters
     )
     blocks_graph = first_blocks_partition.graph
 
@@ -660,8 +693,6 @@ async def main():
     print(f"Ideal population: {ideal_pop:,.1f}")
 
     # Serialize graph for workers — convert to plain networkx Graph first
-    # (GerryChain's Graph subclass overrides .graph, breaking json_graph)
-    # Also strip geometry data (not serializable, not needed for optimization)
     print("Serializing blocks graph for workers...")
     import networkx as nx
     nx_graph = nx.Graph()
@@ -673,109 +704,113 @@ async def main():
         nx_graph.add_edge(u, v)
     graph_data = json_graph.adjacency_data(nx_graph)
 
-    # Transfer all coarse partitions to blocks
-    print("Transferring coarse partitions to blocks...")
-    blocks_assignments = []
-    for i, coarse_part in enumerate(coarse_partitions):
-        print(f"  Transferring partition {i + 1}/{len(coarse_partitions)}...")
-        blocks_part = transfer_to_blocks(
-            geo, coarse_part, "d4-cap", "blocks", blocks_opt_updaters
-        )
-        blocks_assignments.append(dict(blocks_part.assignment))
+    # Create a fresh configuration for the fine outputs so updaters don't cache the coarse graph
+    fine_cfg = build_configuration(geo, "blocks", num_districts)
+    full_updaters = dict(fine_cfg.updaters)
+    full_updaters["pop_dev"] = _pop_dev_updater_fn
+    blocks_gdf = geo.get_pop_geodata("blocks")
+    blocks_graph_full = geo.get_graph("blocks")
+    output_jsonl_path = os.path.join(output_dir, "output.jsonl")
+    updater_names = list(cfg.updaters.keys())
 
-    # Run parallel optimization
-    print(f"\nStarting parallel optimization ({max_workers} workers, "
+    print(f"\nStarting generator pool ({max_workers} workers, "
           f"{annealing_steps} steps per partition)...")
 
     loop = asyncio.get_running_loop()
-
+    
+    successful_maps = 0
+    generated_coarse = 1
+    
     with ProcessPoolExecutor(
         max_workers=max_workers,
         initializer=init_worker,
         initargs=(graph_data, ideal_pop, num_districts, annealing_steps),
     ) as executor:
-        tasks = []
-        for i, assignment in enumerate(blocks_assignments):
+        
+        tasks = set()
+        
+        def submit_optimization_task(step_seq, assignment, seed_val):
             task = loop.run_in_executor(
                 executor,
                 run_optimization_task,
                 assignment,
-                random_seed + i,
-                i + 1,
+                seed_val,
+                step_seq,
             )
-            tasks.append(task)
+            tasks.add(task)
 
-        print(f"Submitted {len(tasks)} optimization tasks. Waiting...")
+        # Submit the very first one
+        submit_optimization_task(1, dict(first_blocks_partition.assignment), random_seed + 1)
+        
+        def dispatch_next_coarse():
+            nonlocal generated_coarse
+            generated_coarse += 1
+            step_seq = generated_coarse
+            
+            c_step, c_part = next(coarse_generator)
+            render_map(c_part, c_step, output_dir, subdir="maps/coarse")
+            
+            b_part = transfer_to_blocks(
+                geo, c_part, "d4-cap", "blocks", blocks_opt_updaters
+            )
+            assign = dict(b_part.assignment)
+            submit_optimization_task(step_seq, assign, random_seed + step_seq)
 
-        # Collect results
-        optimized_results = []
-        for completed_task in asyncio.as_completed(tasks):
-            step_num, opt_assignment, pop_dev, score = await completed_task
-            print(f"  Completed step {step_num}: score={score:.4f}")
-            optimized_results.append((step_num, opt_assignment, pop_dev, score))
+        # Build up initial workers
+        initial_deploy = min(max_workers, num_output_steps)
+        while len(tasks) < initial_deploy:
+            dispatch_next_coarse()
 
-    # Sort by step number
-    optimized_results.sort(key=lambda x: x[0])
-
-    # ------------------------------------------------------------------
-    # Phase 3: Rebuild full partitions, render maps, save metrics
-    # ------------------------------------------------------------------
-    print("\n" + "=" * 60)
-    print("PHASE 3: Rendering Maps and Saving Metrics")
-    print("=" * 60)
-
-    # Build full updater set for metrics evaluation
-    full_updaters = dict(cfg.updaters)
-    full_updaters["pop_dev"] = _pop_dev_updater_fn
-
-    # Rebuild blocks graph with full data for rendering
-    blocks_gdf = geo.get_pop_geodata("blocks")
-    blocks_graph_full = geo.get_graph("blocks")
-
-    output_jsonl_path = os.path.join(output_dir, "output.jsonl")
-    updater_names = list(cfg.updaters.keys())
-
-    with open(output_jsonl_path, "w") as f:
-        for step_num, opt_assignment, pop_dev, score in optimized_results:
-            print(f"Processing output for step {step_num}...")
-
-            try:
-                # Rebuild full partition from optimized assignment
-                full_partition = GeographicPartition(
-                    blocks_graph_full,
-                    assignment=opt_assignment,
-                    updaters=full_updaters,
+        with open(output_jsonl_path, "w") as f:
+            while successful_maps < num_output_steps and tasks:
+                done, pending = await asyncio.wait(
+                    tasks, return_when=asyncio.FIRST_COMPLETED
                 )
-                # Render map
-                render_map(full_partition, step_num, output_dir)
-
-                # Collect and write metrics
-                metrics = collect_metrics(full_partition, step_num, updater_names)
-                metrics["optimization_score"] = score
-                f.write(json.dumps(metrics) + "\n")
-                f.flush()
-
-                # Optional geo export
-                if export_geojson or export_shapefile:
-                    save_geo_output(
-                        full_partition, step_num, blocks_gdf, output_dir,
-                        geojson=export_geojson,
-                        shapefile=export_shapefile,
-                    )
-            except Exception as e:
-                print(f"  WARNING: Failed to process step {step_num}: {e}")
-                # Still write what we have
-                metrics = {
-                    "step": step_num,
-                    "pop_dev": {str(k): v for k, v in sorted(pop_dev.items())},
-                    "optimization_score": score,
-                }
-                f.write(json.dumps(metrics) + "\n")
-                f.flush()
-
-    print(f"\nDone! Results saved to {output_dir}")
-    print(f"  Maps: {os.path.join(output_dir, 'maps')}")
-    print(f"  Metrics: {output_jsonl_path}")
+                
+                for completed_task in done:
+                    tasks.remove(completed_task)
+                    
+                    try:
+                        step_num, opt_assignment, pop_dev, score = completed_task.result()
+                        print(f"  Completed fine step {step_num}: score={score:.4f}")
+                        
+                        full_partition = GeographicPartition(
+                            blocks_graph_full,
+                            assignment=opt_assignment,
+                            updaters=full_updaters,
+                        )
+                        render_map(full_partition, step_num, output_dir)
+                        
+                        metrics = collect_metrics(full_partition, step_num, updater_names)
+                        metrics["optimization_score"] = score
+                        f.write(json.dumps(metrics) + "\n")
+                        f.flush()
+                        
+                        if export_geojson or export_shapefile:
+                            save_geo_output(
+                                full_partition, step_num, blocks_gdf, output_dir,
+                                geojson=export_geojson,
+                                shapefile=export_shapefile,
+                            )
+                            
+                        if score < 1.0:
+                            successful_maps += 1
+                            print(f"  --> Map {step_num} was successful. (Total success: {successful_maps}/{num_output_steps})")
+                        else:
+                            print(f"  --> Map {step_num} failed equal pop threshold. Queueing replacement.")
+                            
+                    except Exception as e:
+                        print(f"  WARNING: Failed to process task: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        
+                # Keep generating more tasks until we hit enough successes
+                while len(tasks) < max_workers and (successful_maps + len(tasks)) < num_output_steps:
+                    dispatch_next_coarse()
+                    
+        print(f"\nDone! Results saved to {output_dir}")
+        print(f"  Maps: {os.path.join(output_dir, 'maps')}")
+        print(f"  Metrics: {output_jsonl_path}")
 
 
 if __name__ == "__main__":
