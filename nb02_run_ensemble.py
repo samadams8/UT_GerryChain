@@ -21,7 +21,7 @@ import json
 from utgc import GeographyManager, ConfigurationManager, precondition, create_partition_iterator
 import utgc.notebookhelper as nbh
 
-tag = "SA"  # <-- Match the tag used in notebook 01
+tag = "test"  # <-- Match the tag used in notebook 01
 
 
 # ── [CELL 2]  Load config, add election updaters ─────────────────────────────
@@ -133,7 +133,7 @@ partition_iterator = create_partition_iterator(
     proposal=proposal,
     initial_partition=initial_partition,
     constraints=cfg.constraints,
-    optimization_scheme_params=cfg.optimization_scheme_params,
+    optimization_scheme_params={"scheme": "neutral"},
     num_steps=num_steps,
 )
 

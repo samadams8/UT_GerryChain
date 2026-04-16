@@ -28,7 +28,7 @@ import utgc.notebookhelper as nbh
 
 # Configuration files and example maps will be saved to a directory with
 # the current date and time plus an optional user-defined tag.
-config_tag = "polish_test"  # <-- Change this to something descriptive if desired
+config_tag = "test"  # <-- Change this to something descriptive if desired
 
 # Where the configuration file and all related results will be saved
 config_dir = os.path.join("output", config_tag or dt.now().strftime("%Y%m%d%H%M%S"))
@@ -49,7 +49,6 @@ print(f"Number of districts: {num_districts}")
 cfg = ConfigurationManager()
 cfg = cfg.set_pop_column("TOTPOP")
 cfg = cfg.add_pop_dev_updater()
-
 
 # ── [CELL 2]  Constraints ────────────────────────────────────────────────────
 # Population deviation tolerance is passed to proposal() and precondition() directly.
@@ -77,7 +76,6 @@ cfg = (cfg
     .constrain_not_equal(not_equal_constraint=True)
 )
 
-
 # ── [CELL 3]  Region surcharges (and commented-out edge penalties) ───────────
 cfg = (cfg
     ### Region surcharge configuration ###
@@ -101,7 +99,6 @@ cfg = (cfg
     #     penalty=0.3,
     # )
 )
-
 
 # ── [CELL 4]  Tilted Run / Shape metrics ────────────────────────────────────
 cfg = (cfg
@@ -163,6 +160,7 @@ munis, counties = nbh.load_boundaries_from_shapefiles()
 run_name = "testrun"
 save_dir = os.path.join(config_dir, run_name)
 os.makedirs(os.path.join(save_dir, "maps"), exist_ok=True)
+cfg.to_config(os.path.join(save_dir, "config.yaml"))
 
 # Serializable, analysis-relevant updaters to write to output.jsonl.
 # Excludes intermediates such as population, pop_dev, perimeter, area,
