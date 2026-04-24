@@ -11,6 +11,50 @@ from gerrychain import MarkovChain, Partition
 from gerrychain.accept import always_accept
 from gerrychain.optimization import SingleMetricOptimizer
 
+def coupon_collector_expectation(num_coupons):
+    ''' 
+    Calculates the expected number of steps to collect `num_coupons` unique coupons.
+    '''
+    return num_coupons * sum(1/i for i in range(1, num_coupons + 1))
+
+class CouponCollectorChain(MarkovChain):
+    """
+    A MarkovChain subclass that runs multiple ReCom micro-steps for each macro-step yielded.
+    """
+    def __init__(self, proposal: Callable, constraints: List[Callable], accept: Callable, initial_state: Partition, micro_steps_per_yield: int, num_macro_steps: int):
+        if not isinstance(micro_steps_per_yield, int) or not isinstance(num_macro_steps, int):
+            raise TypeError("micro_steps_per_yield and num_macro_steps must be integers.")
+        self.micro_steps_per_yield = micro_steps_per_yield
+        self.num_macro_steps = num_macro_steps
+        self.macro_counter = 0
+        # The base chain needs enough capacity to handle all the micro-steps.
+        # It needs 1 for the initial state, plus (num_macro_steps - 1) bursts.
+        total_micro_steps = 1 + max(0, num_macro_steps - 1) * micro_steps_per_yield
+        super().__init__(
+            proposal=proposal,
+            constraints=constraints,
+            accept=accept,
+            initial_state=initial_state,
+            total_steps=total_micro_steps,
+        )
+
+    def __len__(self):
+        return self.num_macro_steps
+
+    def __next__(self):
+        if self.macro_counter >= self.num_macro_steps:
+            raise StopIteration
+            
+        if self.macro_counter == 0:
+            self.macro_counter += 1
+            return super().__next__()
+            
+        for _ in range(self.micro_steps_per_yield):
+            state = super().__next__()
+            
+        self.macro_counter += 1
+        return state
+
 
 def _optimization_metric_from_updater(updater_name: str) -> Callable:
     """Build a single-value optimization metric from a partition updater name."""
@@ -109,6 +153,22 @@ def create_partition_iterator(
         )
         print(
             f"Configured short_bursts run with {num_bursts} bursts of {burst_length} steps each"
+        )
+
+    elif scheme == "coupon_collector":
+        micro_steps_per_yield = scheme_params.get("micro_steps_per_yield", 100)
+        num_macro_steps = scheme_params.get("num_macro_steps", num_steps)
+        chain = CouponCollectorChain(
+            proposal=proposal,
+            constraints=constraints,
+            accept=always_accept,
+            initial_state=initial_partition,
+            micro_steps_per_yield=micro_steps_per_yield,
+            num_macro_steps=num_macro_steps,
+        )
+        partition_iterator = chain.with_progress_bar()
+        print(
+            f"Configured coupon_collector run with {num_macro_steps} macro steps of {micro_steps_per_yield} micro steps each"
         )
 
     else:
