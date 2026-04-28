@@ -5,7 +5,33 @@ import pandas as pd
 from IPython.display import display
 import ipywidgets as widgets
 from PIL import Image
-from typing import Optional
+from typing import Optional, Literal
+
+def get_notebook_params(map_type: Literal["us_house", "ut_house", "ut_senate"]):
+    if map_type == "us_house":
+        return {
+            "prefix": "us_house",
+            "data_tag": "d4-cap",
+            "data_path": "data/UT_capped_d4_eps1e-3.geojson",
+            "init_plan_path": "maps/US-House/preconditioned_1000.zip",
+            "pop_tolerance": 0.001,
+        }
+    elif map_type == "ut_senate":
+        return {
+            "prefix": "ut_senate",
+            "data_tag": "d29-cap",
+            "data_path": "data/UT_capped_d29_eps1e-3.geojson",
+            "init_plan_path": "maps/UT-Senate/preconditioned_3000.zip",
+            "pop_tolerance": 0.01,
+        }
+    elif map_type == "ut_house":
+        return {
+            "prefix": "ut_house",
+            "data_tag": "d75-cap",
+            "data_path": "data/UT_capped_d75_eps1e-3.geojson",
+            "init_plan_path": "maps/UT-House/preconditioned_10000.zip",
+            "pop_tolerance": 0.01,
+        }
 
 def get_district_count(shapefile_path):
     """
@@ -191,3 +217,66 @@ def map_viewer_widget(image_dir):
     # Create and display the widget
     widget_box = widgets.VBox([stepper, img])
     display(widget_box)
+
+def save_partition(partition, filepath: str, geodata: Optional[gpd.GeoDataFrame] = None):
+    """
+    Save a GerryChain Partition to a GeoJSON or Shapefile.
+    
+    Parameters
+    ----------
+    partition : gerrychain.Partition
+        The partition to save.
+    filepath : str
+        The path to save the output file to. Supported extensions are .geojson and .shp.
+    geodata : gpd.GeoDataFrame, optional
+        The original geodataframe used to build the graph. If not provided,
+        this function will attempt to reconstruct it from partition.graph.nodes.
+    """
+    if geodata is None:
+        nodes_data = []
+        for node_id, node_data in partition.graph.nodes(data=True):
+            data = node_data.copy()
+            data["node_id"] = node_id
+            data["assignment"] = partition.assignment.get(node_id)
+            nodes_data.append(data)
+        
+        gdf = gpd.GeoDataFrame(nodes_data)
+        if "geometry" not in gdf.columns:
+            raise ValueError("No geometry found in partition.graph.nodes and no geodata provided.")
+        gdf = gdf.set_geometry("geometry")
+        
+        if hasattr(partition.graph, "crs"):
+            gdf.crs = partition.graph.crs
+        elif hasattr(partition.graph, "graph") and "crs" in partition.graph.graph:
+            gdf.crs = partition.graph.graph["crs"]
+    else:
+        gdf = geodata.copy()
+        gdf["assignment"] = gdf.index.map(dict(partition.assignment))
+
+    gdf = gdf.dropna(subset=["assignment"])
+    districts = gdf.dissolve(by="assignment").reset_index()
+    
+    keep_cols = ["assignment", "geometry"]
+    districts = districts[[c for c in keep_cols if c in districts.columns]]
+
+    filepath_lower = filepath.lower()
+    if filepath_lower.endswith(".geojson"):
+        districts.to_file(filepath, driver="GeoJSON")
+    elif filepath_lower.endswith(".shp"):
+        # Note: A .shp file is actually a collection of files (.shp, .shx, .dbf, .prj).
+        # This will create all of those files at the given path.
+        districts.to_file(filepath)
+    elif filepath_lower.endswith(".zip"):
+        # Save shapefile components to a temporary directory and zip them up
+        import tempfile
+        import shutil
+        
+        base_name = os.path.splitext(os.path.basename(filepath))[0]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shp_path = os.path.join(tmpdir, f"{base_name}.shp")
+            districts.to_file(shp_path)
+            
+            zip_base = os.path.splitext(filepath)[0]
+            shutil.make_archive(zip_base, 'zip', tmpdir)
+    else:
+        raise ValueError("Unsupported file extension. Please use .geojson, .shp, or .zip")
