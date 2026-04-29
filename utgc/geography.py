@@ -9,6 +9,7 @@ and partition.
 import random
 from typing import Optional, Dict, Any, Set, List, Union
 from warnings import warn
+import os
 
 import geopandas as gpd
 import numpy as np
@@ -208,15 +209,23 @@ class GeographyManager:
         Parameters
         ----------
         pop_data : dict
-            Mapping of dataset key to file path (e.g. GeoJSON or shapefile).
+            Mapping of dataset key to file path (e.g. GeoJSON) or dict with "data" and optional "transitability" paths.
         crs : str, optional
             Target CRS for all loaded datasets (default "EPSG:26912").
         """
         self._pop_data = dict(pop_data)
         self._crs = crs
         self._datasets: Dict[str, gpd.GeoDataFrame] = {}
-        for key, path in self._pop_data.items():
-            self._datasets[key] = self._load_one(path)
+        self._transitability: Dict[str, Dict[tuple, float]] = {}
+        for key, value in self._pop_data.items():
+            if isinstance(value, str):
+                self._datasets[key] = self._load_one(value)
+            elif isinstance(value, dict):
+                self._datasets[key] = self._load_one(value["data"])
+                if "transitability" in value:
+                    self._transitability[key] = self._load_transitability(value["transitability"])
+            else:
+                raise ValueError(f"Invalid pop_data format for key '{key}'")
 
     def _load_one(self, path: str) -> gpd.GeoDataFrame:
         """Load one file, transform to self._crs, add area if missing."""
@@ -226,6 +235,23 @@ class GeographyManager:
         if "area" not in gdf.columns:
             gdf["area"] = gdf.geometry.area
         return gdf
+
+    def _load_transitability(self, path: str) -> Dict[tuple, float]:
+        """Load edge transitability weights from CSV."""
+        if not os.path.exists(path):
+            warn(f"Transitability edge file not found: {path}.")
+            return {}
+        edges_df = pd.read_csv(path)
+        has_weights = "w" in edges_df.columns
+        if not has_weights:
+            warn(f"Weight column 'w' not found in {os.path.basename(path)}.")
+        
+        edge_weights = {}
+        for _, row in edges_df.iterrows():
+            edge = tuple(sorted((int(row["u"]), int(row["v"]))))
+            weight = float(row["w"]) if has_weights else 1.0
+            edge_weights[edge] = weight
+        return edge_weights
 
     @property
     def pop_data(self) -> Dict[str, str]:
@@ -244,6 +270,14 @@ class GeographyManager:
                 f"Pop dataset '{key}' not found. Available: {list(self._datasets.keys())}"
             )
         return self._datasets[key]
+
+    def get_edge_weights(self, key: str) -> Dict[tuple, float]:
+        """Return the transitability edge weights dict for the given key, if available."""
+        if key not in self._datasets:
+            raise KeyError(
+                f"Pop dataset '{key}' not found. Available: {list(self._datasets.keys())}"
+            )
+        return self._transitability.get(key, {})
 
     def list_pop_keys(self) -> List[str]:
         """Return the list of population dataset keys."""

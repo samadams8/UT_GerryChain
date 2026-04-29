@@ -35,7 +35,7 @@ class TestConfigurationManagerInit(unittest.TestCase):
         config = ConfigurationManager()
         self.assertEqual(config.region_surcharges, {})
         self.assertEqual(len(config.constraints), 1)  # contiguous only
-        self.assertIsInstance(config.edge_penalties, dict)
+        self.assertIsNone(config.edge_penalty_scale)
 
 
 class TestProposalAndFluentSetters(unittest.TestCase):
@@ -195,31 +195,82 @@ class TestToConfigFromConfigRoundTrip(unittest.TestCase):
         self.assertEqual(loaded.region_surcharges, {"X": 0.1})
 
 
-class TestEdgePenalties(unittest.TestCase):
-    """penalize_edges_from_csv; edge_penalties and from_config path resolution."""
+class TestEdgePenaltyScale(unittest.TestCase):
+    """set_edge_penalty_scale, serialization, and proposal edge_weights."""
 
-    def test_penalize_edges_from_csv(self):
-        fd, csv_path = tempfile.mkstemp(suffix=".csv")
-        os.write(fd, b"u,v,w\n0,1,1.0\n1,2,0.5\n")
-        os.close(fd)
-        self.addCleanup(lambda: os.path.exists(csv_path) and os.remove(csv_path))
-        config = ConfigurationManager().penalize_edges_from_csv(csv_path, penalty=0.3)
-        self.assertIn((0, 1), config.edge_penalties)
-        self.assertIn((1, 2), config.edge_penalties)
+    def test_set_edge_penalty_scale(self):
+        config = ConfigurationManager().set_edge_penalty_scale(0.3)
+        self.assertEqual(config.edge_penalty_scale, 0.3)
 
-    def test_from_config_resolves_relative_path(self):
-        fd, csv_path = tempfile.mkstemp(suffix=".csv")
-        os.write(fd, b"u,v,w\n0,1,1.0\n")
-        os.close(fd)
-        self.addCleanup(lambda: os.path.exists(csv_path) and os.remove(csv_path))
-        config = ConfigurationManager().penalize_edges_from_csv(csv_path, penalty=0.2)
+    def test_from_config_restores_scale(self):
+        config = ConfigurationManager().set_edge_penalty_scale(0.2)
         config_dir = tempfile.mkdtemp()
         self.addCleanup(lambda: os.path.exists(config_dir) and os.rmdir(config_dir) if os.listdir(config_dir) == [] else None)
         yaml_path = os.path.join(config_dir, "config.yaml")
         config.to_config(yaml_path)
-        # from_config should resolve path relative to config file dir
+        self.addCleanup(lambda: os.path.exists(yaml_path) and os.remove(yaml_path))
         loaded = ConfigurationManager.from_config(yaml_path, verbose=False)
-        self.assertGreater(len(loaded.edge_penalties), 0)
+        self.assertEqual(loaded.edge_penalty_scale, 0.2)
+
+    def test_proposal_applies_scale_to_edge_weights(self):
+        config = ConfigurationManager()
+        config.set_pop_column("TOTPOP")
+        config.set_edge_penalty_scale(0.5)
+        graph = Graph()
+        for i in range(2):
+            graph.add_node(i, TOTPOP=100)
+        graph.add_edges_from([(0, 1)])
+        part = GeographicPartition(
+            graph,
+            assignment={0: 0, 1: 1},
+            updaters={"population": updaters.Tally("TOTPOP", alias="population")},
+        )
+        edge_weights = {(0, 1): 0.8}
+        
+        prop = config.proposal(part, total_population=200, num_districts=2, pop_tolerance=0.01, edge_weights=edge_weights)
+        self.assertTrue(callable(prop))
+
+    def test_proposal_warns_if_weights_but_no_scale(self):
+        import warnings
+        config = ConfigurationManager()
+        config.set_pop_column("TOTPOP")
+        graph = Graph()
+        for i in range(2):
+            graph.add_node(i, TOTPOP=100)
+        graph.add_edges_from([(0, 1)])
+        part = GeographicPartition(
+            graph,
+            assignment={0: 0, 1: 1},
+            updaters={"population": updaters.Tally("TOTPOP", alias="population")},
+        )
+        edge_weights = {(0, 1): 0.8}
+        
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            config.proposal(part, total_population=200, num_districts=2, pop_tolerance=0.01, edge_weights=edge_weights)
+            self.assertEqual(len(w), 1)
+            self.assertTrue("set_edge_penalty_scale() was not called" in str(w[-1].message))
+
+    def test_proposal_warns_if_scale_but_no_weights(self):
+        import warnings
+        config = ConfigurationManager()
+        config.set_pop_column("TOTPOP")
+        config.set_edge_penalty_scale(0.5)
+        graph = Graph()
+        for i in range(2):
+            graph.add_node(i, TOTPOP=100)
+        graph.add_edges_from([(0, 1)])
+        part = GeographicPartition(
+            graph,
+            assignment={0: 0, 1: 1},
+            updaters={"population": updaters.Tally("TOTPOP", alias="population")},
+        )
+        
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            config.proposal(part, total_population=200, num_districts=2, pop_tolerance=0.01)
+            self.assertEqual(len(w), 1)
+            self.assertTrue("no edge_weights were provided" in str(w[-1].message))
 
 
 class TestColumnCoordination(unittest.TestCase):

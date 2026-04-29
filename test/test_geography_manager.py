@@ -481,5 +481,39 @@ class TestBuildElectionDicts(unittest.TestCase):
         self.assertEqual(result["2022SEN"]["D1"], "G22SENDFOO")
 
 
+class TestGeographyManagerTransitability(unittest.TestCase):
+    """Loading transitability and get_edge_weights()."""
+
+    def setUp(self):
+        self.pop_path = _minimal_geodata_path()
+        fd, self.csv_path = tempfile.mkstemp(suffix=".csv")
+        os.write(fd, b"u,v,w\n0,1,0.5\n1,2,0.8\n")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(self.pop_path) and os.remove(self.pop_path))
+        self.addCleanup(lambda: os.path.exists(self.csv_path) and os.remove(self.csv_path))
+
+    def test_get_edge_weights_empty_if_no_transitability_provided(self):
+        manager = GeographyManager(pop_data={"k": self.pop_path})
+        self.assertEqual(manager.get_edge_weights("k"), {})
+
+    def test_get_edge_weights_returns_dict(self):
+        manager = GeographyManager(pop_data={
+            "k": {
+                "data": self.pop_path,
+                "transitability": self.csv_path
+            }
+        })
+        weights = manager.get_edge_weights("k")
+        self.assertIn((0, 1), weights)
+        self.assertEqual(weights[(0, 1)], 0.5)
+        self.assertIn((1, 2), weights)
+        self.assertEqual(weights[(1, 2)], 0.8)
+
+    def test_get_edge_weights_missing_key_raises(self):
+        manager = GeographyManager(pop_data={"k": self.pop_path})
+        with self.assertRaises(KeyError):
+            manager.get_edge_weights("missing")
+
+
 if __name__ == "__main__":
     unittest.main()

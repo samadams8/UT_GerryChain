@@ -41,7 +41,7 @@ class ConfigurationManager:
         }
         self.construction_history: List[Dict[str, Any]] = []
         self.region_surcharges: Dict[str, float] = {}
-        self.edge_penalties: Dict[tuple, float] = {}
+        self.edge_penalty_scale: Optional[float] = None
         self.constraints: List[Callable] = [contiguous]
         self.updaters: Dict[str, Callable] = {
             "population": updaters.Tally("TOTPOP", alias="population"),
@@ -158,29 +158,15 @@ class ConfigurationManager:
         return self
 
     # Edge penalties
-    def penalize_edges_from_csv(self,
-        csv_path: str,
-        penalty: float,
-        weight_column: str = "w",
-    ) -> "ConfigurationManager":
-        if not os.path.exists(csv_path):
-            warn(f"Transitability edge file not found: {csv_path}. Skipping edge penalties.")
-            return self
-        if penalty <= 0:
+    def set_edge_penalty_scale(self, scale: float) -> "ConfigurationManager":
+        if scale <= 0:
             return self
         self.construction_history.append({
-            "method": "penalize_edges_from_csv",
-            "kwargs": {"csv_path": csv_path, "penalty": penalty, "weight_column": weight_column},
+            "method": "set_edge_penalty_scale",
+            "kwargs": {"scale": scale},
         })
-        edges_df = pd.read_csv(csv_path)
-        has_weights = weight_column in edges_df.columns
-        if not has_weights:
-            warn(f"Weight column '{weight_column}' not found in {os.path.basename(csv_path)}. Using constant penalty.")
-        for _, row in edges_df.iterrows():
-            edge = tuple(sorted((int(row["u"]), int(row["v"]))))
-            edge_weight = row[weight_column] * penalty if has_weights else penalty
-            self.edge_penalties[edge] = self.edge_penalties.get(edge, 0) + edge_weight
-        self._log(f"Penalizing edges from {os.path.basename(csv_path)} with factor {penalty}")
+        self.edge_penalty_scale = scale
+        self._log(f"Edge penalty scale set to {scale}")
         return self
 
     # Updaters
@@ -374,6 +360,7 @@ class ConfigurationManager:
         total_population: Optional[float] = None,
         num_districts: Optional[int] = None,
         pop_tolerance: float = 0.01,
+        edge_weights: Optional[Dict[tuple, float]] = None,
     ) -> Callable[[Partition], Partition]:
         """
         Create a ReCom proposal. Population and tolerance are supplied at call time.
@@ -405,10 +392,21 @@ class ConfigurationManager:
             "total_pop": total_population,
             "pop_tolerance": pop_tolerance,
         }
+        
+        edge_penalties = {}
+        if edge_weights is not None:
+            if self.edge_penalty_scale is not None:
+                edge_penalties = {edge: w * self.edge_penalty_scale for edge, w in edge_weights.items()}
+            else:
+                warn("edge_weights provided to proposal() but set_edge_penalty_scale() was not called. Applying weights at scale=1.0.")
+                edge_penalties = dict(edge_weights)
+        elif self.edge_penalty_scale is not None:
+            warn("set_edge_penalty_scale() was called but no edge_weights were provided to proposal().")
+
         return create_recom_proposal(
             population_params,
             self.region_surcharges,
-            self.edge_penalties,
+            edge_penalties,
             num_districts=num_d,
             pop_tolerance=pop_tolerance,
         )

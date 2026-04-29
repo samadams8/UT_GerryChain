@@ -13,6 +13,7 @@ def get_notebook_params(map_type: Literal["us_house", "ut_house", "ut_senate"]):
             "prefix": "us_house",
             "data_tag": "d4-cap",
             "data_path": "data/UT_capped_d4_eps1e-3.geojson",
+            "transitability_path": "data/UT_capped_d4_eps1e-3_transitability.csv",
             "init_plan_path": "maps/US-House/preconditioned_1000.zip",
             "pop_tolerance": 0.001,
         }
@@ -21,6 +22,7 @@ def get_notebook_params(map_type: Literal["us_house", "ut_house", "ut_senate"]):
             "prefix": "ut_senate",
             "data_tag": "d29-cap",
             "data_path": "data/UT_capped_d29_eps1e-3.geojson",
+            "transitability_path": "data/UT_capped_d29_eps1e-3_transitability.csv",
             "init_plan_path": "maps/UT-Senate/preconditioned_3000.zip",
             "pop_tolerance": 0.01,
         }
@@ -29,6 +31,7 @@ def get_notebook_params(map_type: Literal["us_house", "ut_house", "ut_senate"]):
             "prefix": "ut_house",
             "data_tag": "d75-cap",
             "data_path": "data/UT_capped_d75_eps1e-3.geojson",
+            "transitability_path": "data/UT_capped_d75_eps1e-3_transitability.csv",
             "init_plan_path": "maps/UT-House/preconditioned_10000.zip",
             "pop_tolerance": 0.01,
         }
