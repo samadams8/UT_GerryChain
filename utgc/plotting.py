@@ -325,12 +325,7 @@ def visualize_partition(
         vmin, vmax = color_by_norm if color_by_norm is not None else (0.0, 1.0)
         norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
 
-    # Prepare figure with two panels: full map (left) and Wasatch Front zoom (right)
-    # Leave room on the right for a colorbar when using choropleth
-    if value_gdf is not None:
-        fig, (ax_full, ax_zoom) = plt.subplots(1, 2, figsize=(13, 8))
-    else:
-        fig, (ax_full, ax_zoom) = plt.subplots(1, 2, figsize=(12, 8))
+    fig, (ax_full, ax_zoom) = plt.subplots(1, 2, figsize=(12, 8))
 
     num_parts = len(partition)
     cmap = plt.get_cmap(colormap, num_parts)
@@ -346,6 +341,21 @@ def visualize_partition(
                 ax=ax, color='black', linewidth=1, alpha=0.5
             )
 
+    def _plot_district_outlines(ax):
+        """Dissolve precinct geometries to district level and draw outlines."""
+        if value_gdf is not None:
+            outlines = value_gdf.dissolve(by='_district')
+        else:
+            from shapely.ops import unary_union
+            geom_series = partition.graph.geometry
+            district_polys = {
+                d: unary_union([geom_series[n] for n in nodes])
+                for d, nodes in partition.parts.items()
+            }
+            outlines = gpd.GeoDataFrame(geometry=list(district_polys.values()),
+                                        crs=geom_series.crs)
+        outlines.boundary.plot(ax=ax, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+
     # Left: full map
     if value_gdf is not None:
         value_gdf.plot(ax=ax_full, column='color_val', cmap=colormap,
@@ -353,6 +363,7 @@ def visualize_partition(
     else:
         partition.plot(ax=ax_full, cmap=cmap, edgecolor='none')
     _plot_boundaries(ax_full)
+    _plot_district_outlines(ax_full)
 
     title = f"Step {step}"
     if split_munis_count is not None:
@@ -371,6 +382,7 @@ def visualize_partition(
     else:
         partition.plot(ax=ax_zoom, cmap=cmap, edgecolor='none')
     _plot_boundaries(ax_zoom)
+    _plot_district_outlines(ax_zoom)
 
     wf_bounds = _find_wasatch_front_bounds(counties)
     if wf_bounds is not None:
