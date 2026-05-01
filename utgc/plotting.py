@@ -1,12 +1,14 @@
 import os
+import warnings
 from math import ceil
 import pandas as pd
 import geopandas as gpd
 import matplotlib.pyplot as plt
+import matplotlib.colors
 import seaborn as sns
 import numpy as np
 from gerrychain import GeographicPartition
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any, Tuple, Union
 
 from seaborn.utils import despine
 
@@ -203,6 +205,39 @@ def _find_wasatch_front_bounds(counties_gdf):
         except Exception:
             return None
 
+def _build_value_gdf(partition, updater_name: str) -> gpd.GeoDataFrame:
+    """
+    Build a GeoDataFrame with a ``color_val`` column from a district-level updater.
+
+    Each row corresponds to a graph node (VTD/precinct). The ``color_val`` column
+    holds the scalar updater value for that node's assigned district.
+
+    Parameters
+    ----------
+    partition : GeographicPartition
+        The active partition. Must have ``.geometries`` (GeoDataFrame indexed by
+        node id), ``.assignment`` (dict node_id -> district_id), and support
+        ``partition[updater_name]`` returning a ``dict[district_id -> float]``.
+    updater_name : str
+        Key of the district-level updater to extract values from.
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        Copy of ``partition.geometries`` with an added ``color_val`` column.
+    """
+    district_values: dict = partition[updater_name]
+    assignment: dict = dict(partition.assignment)
+    gdf = gpd.GeoDataFrame(geometry=partition.graph.geometry)
+    
+    # Convert keys to strings to avoid type mismatch (e.g., int vs str district IDs)
+    str_district_values = {str(k): v for k, v in district_values.items()}
+    gdf['_district'] = gdf.index.map(assignment).astype(str)
+    gdf['color_val'] = gdf['_district'].map(str_district_values)
+    
+    return gdf
+
+
 def visualize_partition(
     partition: GeographicPartition,
     step: int,
@@ -217,6 +252,8 @@ def visualize_partition(
     muni_path: Optional[str] = None,
     dpi: Optional[int] = 300,
     colormap: Optional[str] = 'Spectral',
+    color_by: Optional[str] = None,
+    color_by_norm: Optional[Tuple[float, float]] = None,
 ):
     """
     Visualize a partition with optional municipality and county boundaries.
@@ -247,7 +284,15 @@ def visualize_partition(
     muni_path : str, optional
         Absolute path to municipality shapefile. If provided, takes precedence over bounds_dir.
     colormap : str, optional
-        Colormap to use for the partition, by default 'Spectral'
+        Colormap to use for the partition, by default ``'Spectral'``.
+    color_by : str, optional
+        Name of a district-level updater whose value is a ``dict[district_id ->
+        float]``. When provided, districts are colored by the scalar value rather
+        than by district ID. A diverging colormap (e.g. ``'coolwarm'``) is
+        recommended. Defaults to ``None`` (categorical coloring).
+    color_by_norm : tuple of (float, float), optional
+        ``(vmin, vmax)`` normalization range for ``color_by`` coloring. Defaults
+        to ``(0.0, 1.0)`` when ``color_by`` is set.
     """
     # Auto-load boundaries if not provided
     if auto_load_boundaries:
@@ -264,22 +309,51 @@ def visualize_partition(
             if counties is None:
                 counties = loaded_counties
     
+    # Resolve color_by GeoDataFrame and normalization up front
+    value_gdf = None
+    if color_by is not None:
+        try:
+            value_gdf = _build_value_gdf(partition, color_by)
+        except (KeyError, Exception) as exc:
+            warnings.warn(
+                f"visualize_partition: color_by='{color_by}' failed ({exc}); "
+                "falling back to categorical colormap."
+            )
+            value_gdf = None
+
+    if value_gdf is not None:
+        vmin, vmax = color_by_norm if color_by_norm is not None else (0.0, 1.0)
+        norm = matplotlib.colors.Normalize(vmin=vmin, vmax=vmax)
+
     # Prepare figure with two panels: full map (left) and Wasatch Front zoom (right)
-    fig, (ax_full, ax_zoom) = plt.subplots(1, 2, figsize=(12, 8))
+    # Leave room on the right for a colorbar when using choropleth
+    if value_gdf is not None:
+        fig, (ax_full, ax_zoom) = plt.subplots(1, 2, figsize=(13, 8))
+    else:
+        fig, (ax_full, ax_zoom) = plt.subplots(1, 2, figsize=(12, 8))
 
     num_parts = len(partition)
     cmap = plt.get_cmap(colormap, num_parts)
 
+    def _plot_boundaries(ax):
+        """Overlay municipality and county boundaries onto ax."""
+        if municipalities is not None:
+            municipalities.boundary.plot(
+                ax=ax, color='black', linewidth=0.25, alpha=0.5
+            )
+        if counties is not None:
+            counties.boundary.plot(
+                ax=ax, color='black', linewidth=1, alpha=0.5
+            )
+
     # Left: full map
-    partition.plot(ax=ax_full, cmap=cmap, edgecolor='none')
-    if municipalities is not None:
-        municipalities.boundary.plot(
-            ax=ax_full, color='black', linewidth=0.25, alpha=0.5
-        )
-    if counties is not None:
-        counties.boundary.plot(
-            ax=ax_full, color='black', linewidth=1, alpha=0.5
-        )
+    if value_gdf is not None:
+        value_gdf.plot(ax=ax_full, column='color_val', cmap=colormap,
+                       norm=norm, edgecolor='none', legend=False)
+    else:
+        partition.plot(ax=ax_full, cmap=cmap, edgecolor='none')
+    _plot_boundaries(ax_full)
+
     title = f"Step {step}"
     if split_munis_count is not None:
         title += f", Muni Splits={split_munis_count}"
@@ -291,15 +365,12 @@ def visualize_partition(
     ax_full.set_aspect('equal')
 
     # Right: Wasatch Front zoom (fallback to full extent if bounds unresolved)
-    partition.plot(ax=ax_zoom, cmap=cmap, edgecolor='none')
-    if municipalities is not None:
-        municipalities.boundary.plot(
-            ax=ax_zoom, color='black', linewidth=0.25, alpha=0.5
-        )
-    if counties is not None:
-        counties.boundary.plot(
-            ax=ax_zoom, color='black', linewidth=1, alpha=0.5
-        )
+    if value_gdf is not None:
+        value_gdf.plot(ax=ax_zoom, column='color_val', cmap=colormap,
+                       norm=norm, edgecolor='none', legend=False)
+    else:
+        partition.plot(ax=ax_zoom, cmap=cmap, edgecolor='none')
+    _plot_boundaries(ax_zoom)
 
     wf_bounds = _find_wasatch_front_bounds(counties)
     if wf_bounds is not None:

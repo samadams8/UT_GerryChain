@@ -28,8 +28,7 @@ class CouponCollectorChain(MarkovChain):
         self.num_macro_steps = num_macro_steps
         self.macro_counter = 0
         # The base chain needs enough capacity to handle all the micro-steps.
-        # It needs 1 for the initial state, plus (num_macro_steps - 1) bursts.
-        total_micro_steps = 1 + max(0, num_macro_steps - 1) * micro_steps_per_yield
+        total_micro_steps = num_macro_steps * micro_steps_per_yield
         super().__init__(
             proposal=proposal,
             constraints=constraints,
@@ -44,10 +43,6 @@ class CouponCollectorChain(MarkovChain):
     def __next__(self):
         if self.macro_counter >= self.num_macro_steps:
             raise StopIteration
-            
-        if self.macro_counter == 0:
-            self.macro_counter += 1
-            return super().__next__()
             
         for _ in range(self.micro_steps_per_yield):
             state = super().__next__()
