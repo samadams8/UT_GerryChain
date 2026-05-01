@@ -216,6 +216,7 @@ def visualize_partition(
     county_path: Optional[str] = None,
     muni_path: Optional[str] = None,
     dpi: Optional[int] = 300,
+    colormap: Optional[str] = 'Spectral',
 ):
     """
     Visualize a partition with optional municipality and county boundaries.
@@ -245,6 +246,8 @@ def visualize_partition(
         Absolute path to county shapefile. If provided, takes precedence over bounds_dir.
     muni_path : str, optional
         Absolute path to municipality shapefile. If provided, takes precedence over bounds_dir.
+    colormap : str, optional
+        Colormap to use for the partition, by default 'Spectral'
     """
     # Auto-load boundaries if not provided
     if auto_load_boundaries:
@@ -264,8 +267,11 @@ def visualize_partition(
     # Prepare figure with two panels: full map (left) and Wasatch Front zoom (right)
     fig, (ax_full, ax_zoom) = plt.subplots(1, 2, figsize=(12, 8))
 
+    num_parts = len(partition)
+    cmap = plt.get_cmap(colormap, num_parts)
+
     # Left: full map
-    partition.plot(ax=ax_full, cmap='tab20c', edgecolor='none')
+    partition.plot(ax=ax_full, cmap=cmap, edgecolor='none')
     if municipalities is not None:
         municipalities.boundary.plot(
             ax=ax_full, color='black', linewidth=0.25, alpha=0.5
@@ -285,7 +291,7 @@ def visualize_partition(
     ax_full.set_aspect('equal')
 
     # Right: Wasatch Front zoom (fallback to full extent if bounds unresolved)
-    partition.plot(ax=ax_zoom, cmap='tab20c', edgecolor='none')
+    partition.plot(ax=ax_zoom, cmap=cmap, edgecolor='none')
     if municipalities is not None:
         municipalities.boundary.plot(
             ax=ax_zoom, color='black', linewidth=0.25, alpha=0.5
