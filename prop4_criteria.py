@@ -15,6 +15,8 @@ config_tag = params["prefix"] + ""  # <-- Change this to something descriptive i
 
 # Where the configuration file and all related results will be saved
 config_dir = os.path.join("output", config_tag or dt.now().strftime("%Y%m%d%H%M%S"))
+run_name = "ensemble"
+save_dir = os.path.join(config_dir, run_name)
 
 # Data file path
 geo = GeographyManager(
@@ -28,7 +30,20 @@ geo = GeographyManager(
 )
 geo.fill_empty_ids(params["data_tag"], ["MUNIID"])
 
+import glob
+
 initial_plan = params["init_plan_path"]
+start_step = 0
+shapefiles_dir = os.path.join(save_dir, "maps", "shapefiles")
+if os.path.exists(shapefiles_dir):
+    saved_zips = glob.glob(os.path.join(shapefiles_dir, "step_*.zip"))
+    if saved_zips:
+        last_file = max(saved_zips)
+        filename = os.path.basename(last_file)
+        start_step = int(filename.split("_")[1].split(".")[0]) + 1
+        initial_plan = last_file
+        print(f"Resuming from step {start_step-1} using {last_file}")
+
 num_districts = nbh.get_district_count(initial_plan)
 print(f"Number of districts: {num_districts}")
 
@@ -134,8 +149,6 @@ import utgc.plotting as gcplt
 
 munis, counties = nbh.load_boundaries_from_shapefiles()
 
-run_name = "ensemble"
-save_dir = os.path.join(config_dir, run_name)
 os.makedirs(os.path.join(save_dir, "maps"), exist_ok=True)
 cfg.to_config(os.path.join(save_dir, "config.yaml"))
 
@@ -161,17 +174,22 @@ chain = CouponCollectorChain(
     accept=always_accept,
     initial_state=initial_partition,
     micro_steps_per_yield=ceil(coupon_collector_expectation(num_districts)),
-    num_macro_steps=num_steps,
+    num_macro_steps=max(0, num_steps - start_step),
 )
 
 print(f"=== MCMC {run_name} ===")
-print("Running Markov chain (Batched/Coupon Collector)...")
-partition_iterator = chain.with_progress_bar()
+if start_step >= num_steps:
+    print(f"Already reached desired {num_steps} steps. Skipping chain.")
+    partition_iterator = []
+else:
+    print("Running Markov chain (Batched/Coupon Collector)...")
+    partition_iterator = chain.with_progress_bar()
 
 output_path = os.path.join(save_dir, "output.jsonl")
 assignments_path = os.path.join(save_dir, "assignments.jsonl")
-with open(output_path, "w") as f:
-    for step_number, partition in enumerate(partition_iterator):
+file_mode = "a" if start_step > 0 else "w"
+with open(output_path, file_mode) as f:
+    for step_number, partition in enumerate(partition_iterator, start=start_step):
         # Save metrics (output_updaters subset only)
         data = {"step": step_number}
         for name in output_updaters:
