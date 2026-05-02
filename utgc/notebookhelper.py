@@ -16,6 +16,15 @@ def get_notebook_params(map_type: Literal["us_house", "ut_house", "ut_senate"]):
             "transitability_path": "data/UT_capped_d4_eps1e-3_transitability.csv",
             "init_plan_path": "maps/US-House/preconditioned_1000.zip",
             "pop_tolerance": 0.001,
+            "comparison_maps": {
+                "Map C": "maps/US-House/2025_USH_Leg-C/2025_USH_Leg-C.shp",
+                "Plaintiff 1": "maps/US-House/2025_USH_Plaintiff-1/2025_USH_Plaintiff-1.shp",
+                "Plaintiff 2": "maps/US-House/2025_USH_Plaintiff-2/2025_USH_Plaintiff-2.shp",
+                "2021 Enacted": "maps/US-House/2021_USH_Enacted/2021_USH_Enacted.shp",
+                "UIRC Orange": "maps/US-House/2021_USH_UIRC-Orange/2021_USH_UIRC-Orange.shp",
+                "UIRC Purple": "maps/US-House/2021_USH_UIRC-Purple/2021_USH_UIRC-Purple.shp",
+                "UIRC Public": "maps/US-House/2021_USH_UIRC-Public/2021_USH_UIRC-Public.shp",
+            },
         }
     elif map_type == "ut_senate":
         return {
@@ -25,6 +34,12 @@ def get_notebook_params(map_type: Literal["us_house", "ut_house", "ut_senate"]):
             "transitability_path": "data/UT_capped_d29_eps1e-3_transitability.csv",
             "init_plan_path": "maps/UT-Senate/preconditioned_3000.zip",
             "pop_tolerance": 0.01,
+            "comparison_maps": {
+                "Enacted": "maps/UT-Senate/2021_UTS_Enacted/2021_UTS_Enacted.shp",
+                "UIRC Green": "maps/UT-Senate/2021_UTS_UIRC-Green/2021_UTS_UIRC-Green.shp",
+                "UIRC Orange": "maps/UT-Senate/2021_UTS_UIRC-Orange/2021_UTS_UIRC-Orange.shp",
+                "UIRC Purple": "maps/UT-Senate/2021_UTS_UIRC-Purple/2021_UTS_UIRC-Purple.shp",
+            },
         }
     elif map_type == "ut_house":
         return {
@@ -34,6 +49,12 @@ def get_notebook_params(map_type: Literal["us_house", "ut_house", "ut_senate"]):
             "transitability_path": "data/UT_capped_d75_eps1e-3_transitability.csv",
             "init_plan_path": "maps/UT-House/preconditioned_10000.zip",
             "pop_tolerance": 0.01,
+            "comparison_maps": {
+                "Enacted": "maps/UT-House/2021_UTH_Enacted/2021_UTH_Enacted.shp",
+                "UIRC Green": "maps/UT-House/2021_UTH_UIRC-Green/2021_UTH_UIRC-Green.shp",
+                "UIRC Orange": "maps/UT-House/2021_UTH_UIRC-Orange/2021_UTH_UIRC-Orange.shp",
+                "UIRC Purple": "maps/UT-House/2021_UTH_UIRC-Purple/2021_UTH_UIRC-Purple.shp",
+            },
         }
 
 def get_district_count(shapefile_path):

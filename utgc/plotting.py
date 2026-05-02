@@ -354,7 +354,7 @@ def visualize_partition(
             }
             outlines = gpd.GeoDataFrame(geometry=list(district_polys.values()),
                                         crs=geom_series.crs)
-        outlines.boundary.plot(ax=ax, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+        outlines.boundary.plot(ax=ax, color='gray', linewidth=1, alpha=1.0)
 
     # Left: full map
     if value_gdf is not None:
@@ -362,8 +362,8 @@ def visualize_partition(
                        norm=norm, edgecolor='none', legend=False)
     else:
         partition.plot(ax=ax_full, cmap=cmap, edgecolor='none')
-    _plot_boundaries(ax_full)
     _plot_district_outlines(ax_full)
+    _plot_boundaries(ax_full)
 
     title = f"Step {step}"
     if split_munis_count is not None:
@@ -381,8 +381,8 @@ def visualize_partition(
                        norm=norm, edgecolor='none', legend=False)
     else:
         partition.plot(ax=ax_zoom, cmap=cmap, edgecolor='none')
-    _plot_boundaries(ax_zoom)
     _plot_district_outlines(ax_zoom)
+    _plot_boundaries(ax_zoom)
 
     wf_bounds = _find_wasatch_front_bounds(counties)
     if wf_bounds is not None:
