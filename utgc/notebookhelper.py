@@ -304,3 +304,29 @@ def save_partition(partition, filepath: str, geodata: Optional[gpd.GeoDataFrame]
             shutil.make_archive(zip_base, 'zip', tmpdir)
     else:
         raise ValueError("Unsupported file extension. Please use .geojson, .shp, or .zip")
+
+def get_updater_values(partition, updaters_to_save):
+    """
+    Extract values from a gerrychain Partition for saving.
+    
+    Parameters
+    ----------
+    partition : gerrychain.Partition
+        The partition to extract values from.
+    updaters_to_save : list
+        List of updater names to extract values for.
+        
+    Returns
+    -------
+    dict
+        Dictionary of updater values.
+    """
+    data = {}
+    for name in updaters_to_save:
+        value = partition[name]
+        if isinstance(value, dict):
+            data[name] = {str(k): v for k, v in sorted(value.items())}
+        else:
+            data[name] = str(value)
+    
+    return data

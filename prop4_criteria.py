@@ -194,13 +194,10 @@ file_mode = "a" if start_step > 0 else "w"
 with open(output_path, file_mode) as f:
     for step_number, partition in enumerate(partition_iterator, start=start_step):
         # Save metrics (output_updaters subset only)
-        data = {"step": step_number}
-        for name in cfg.updaters_to_save:
-            value = partition[name]
-            if isinstance(value, dict):
-                data[name] = {str(k): str(v) for k, v in sorted(value.items())}
-            else:
-                data[name] = str(value)
+        data = (
+            {"step": step_number}
+            | nbh.get_updater_values(partition, cfg.updaters_to_save)
+        )
         f.write(json.dumps(data) + "\n")
         f.flush()
 
@@ -229,6 +226,7 @@ with open(output_path, file_mode) as f:
         partition.parent = None
 print("Done.")
 
+print("Computing performance of comparison maps")
 def compute_metrics_for_map(shapefile_path, geo, cfg, pop_key=params["data_tag"]):
     """Return a dict of output_updater values for a given electoral map."""
     partition = geo.build_partition(
@@ -236,16 +234,7 @@ def compute_metrics_for_map(shapefile_path, geo, cfg, pop_key=params["data_tag"]
         plan=shapefile_path,
         updaters=cfg.updaters,
     )
-    result = {}
-    for name in output_updaters:
-        if name not in cfg.updaters:
-            continue
-        value = partition[name]
-        if isinstance(value, dict):
-            result[name] = {str(k): v for k, v in sorted(value.items())}
-        else:
-            result[name] = value
-    return result
+    return nbh.get_updater_values(partition, cfg.updaters_to_save)
 
 comparison_maps = {}
 for k, v in params["comparison_maps"].items():
