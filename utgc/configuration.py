@@ -46,6 +46,12 @@ class ConfigurationManager:
         self.updaters: Dict[str, Callable] = {
             "population": updaters.Tally("TOTPOP", alias="population"),
         }
+        self.ignored_updaters: List[str] = []
+
+    @property
+    def updaters_to_save(self) -> List[str]:
+        """Returns a list of updater names that are not marked as ignored."""
+        return [name for name in self.updaters if name not in self.ignored_updaters]
 
     def _log(self, msg: str) -> None:
         """Print only when verbose (e.g. when loading one config to confirm)."""
@@ -74,6 +80,8 @@ class ConfigurationManager:
             return {k: v - ideal for k, v in pop.items()}
 
         self.updaters[name] = _pop_dev_fn
+        if ignore_output and name not in self.ignored_updaters:
+            self.ignored_updaters.append(name)
         self._log(f"  Added population deviation updater: '{name}'")
         return self
 
@@ -140,6 +148,8 @@ class ConfigurationManager:
             self._log("Constraint: prevent same map from being generated twice in a row")
             if create_updater and "assignment_hash" not in self.updaters:
                 self.updaters["assignment_hash"] = rutil._assignment_hash
+                if ignore_output and "assignment_hash" not in self.ignored_updaters:
+                    self.ignored_updaters.append("assignment_hash")
                 self._log("  Added 'assignment_hash' updater")
         else:
             self._log("Constraint: allow same map to be generated twice in a row")
@@ -188,6 +198,8 @@ class ConfigurationManager:
             pop_col=self.population_params["column_id"],
             scores_to_compute=["num_split_localities", "num_parts"],
         )
+        if ignore_ls_output and ls_name not in self.ignored_updaters:
+            self.ignored_updaters.append(ls_name)
         self._log(f"  Added locality split updater: '{ls_name}'")
         sname = f"split_{name}"
         self.updaters[sname] = lambda p, ls=ls_name: p[ls].get("num_split_localities", 0)
@@ -210,7 +222,12 @@ class ConfigurationManager:
             "method": "add_election_updater",
             "kwargs": {"name": name, "parties_to_columns": parties_to_columns, "ignore_output": ignore_output},
         })
-        self.updaters[name] = updaters.Election(name=name, parties_to_columns=parties_to_columns)
+        self.updaters[name] = updaters.Election(
+            name=name,
+            parties_to_columns=parties_to_columns
+        )
+        if ignore_output and name not in self.ignored_updaters:
+            self.ignored_updaters.append(name)
         self._log(f"  Added election updater: '{name}'")
         return self
 
@@ -271,7 +288,11 @@ class ConfigurationManager:
             },
         })
         self.updaters[f"{name}_table"] = lambda p: utmetrics.tabulate_partisan_data(p, elections, parties)
+        if ignore_table_output and f"{name}_table" not in self.ignored_updaters:
+            self.ignored_updaters.append(f"{name}_table")
         self.updaters[name] = lambda p: utmetrics.aggregate_partisan_metrics(p[f"{name}_table"])
+        if ignore_agg_output and name not in self.ignored_updaters:
+            self.ignored_updaters.append(name)
         self._log(f"  Added partisan data aggregator: '{name}'")
         return self
 
@@ -332,6 +353,8 @@ class ConfigurationManager:
         if name in self.updaters:
             self._log(f"Updater function '{name}' already exists. Overwriting...")
         self.updaters[name] = function
+        if ignore_output and name not in self.ignored_updaters:
+            self.ignored_updaters.append(name)
         self._log(f"  Added updater function: '{name}'")
         return self
 

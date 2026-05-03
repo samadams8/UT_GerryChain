@@ -116,7 +116,10 @@ election_dicts = geo.build_election_dicts(
 )
 
 cfg = (cfg
-    .add_election_updaters(elections=election_dicts, skip_if_missing_parties=True)
+    .add_election_updaters(
+        elections=election_dicts,
+        skip_if_missing_parties=True
+    )
     .add_election_aggregator(
         name="sb1011_data",
         elections=[
@@ -192,14 +195,12 @@ with open(output_path, file_mode) as f:
     for step_number, partition in enumerate(partition_iterator, start=start_step):
         # Save metrics (output_updaters subset only)
         data = {"step": step_number}
-        for name in output_updaters:
-            if name not in cfg.updaters:
-                continue
+        for name in cfg.updaters_to_save:
             value = partition[name]
             if isinstance(value, dict):
-                data[name] = {str(k): v for k, v in sorted(value.items())}
+                data[name] = {str(k): str(v) for k, v in sorted(value.items())}
             else:
-                data[name] = value
+                data[name] = str(value)
         f.write(json.dumps(data) + "\n")
         f.flush()
 
