@@ -1,14 +1,15 @@
 import os
 from datetime import datetime as dt
 from math import floor, ceil
+import json
 
 from utgc import GeographyManager, ConfigurationManager, precondition
 import utgc.notebookhelper as nbh
 from utgc.chain import CouponCollectorChain, coupon_collector_expectation
 from gerrychain.chain import MarkovChain
 
-params = nbh.get_notebook_params("ut_senate")
-num_steps = 1000
+params = nbh.get_notebook_params("us_house")
+num_steps = 100
 
 # Configuration files and example maps will be saved to a tagged directory
 config_tag = params["prefix"] + ""  # <-- Change this to something descriptive if desired
@@ -121,6 +122,45 @@ cfg = (cfg
         skip_if_missing_parties=True
     )
     .add_election_aggregator(
+        name="2016",
+        elections=["2016PRE", "2016GOV", "2016ATG"],
+        parties=["D", "R", "-"],
+    )
+    .add_election_metric_updaters(
+        "2016",
+        [
+            "efficiency_gap", "stdev_partisan_share",
+            "majority_partisan_shares", "majority_seats",
+        ],
+        prepend_agg_name=True
+    )
+    .add_election_aggregator(
+        name="2020",
+        elections=["2020PRE", "2020GOV", "2020ATG"],
+        parties=["D", "R", "-"],
+    )
+    .add_election_metric_updaters(
+        "2020", 
+        [
+            "efficiency_gap", "stdev_partisan_share",
+            "majority_partisan_shares", "majority_seats",
+        ],
+        prepend_agg_name=True
+    )
+    .add_election_aggregator(
+        name="2024",
+        elections=["2024PRE", "2024GOV", "2024ATG"],
+        parties=["D", "R", "-"],
+    )
+    .add_election_metric_updaters(
+        "2024",
+        [
+            "efficiency_gap", "stdev_partisan_share",
+            "majority_partisan_shares", "majority_seats",
+        ],
+        prepend_agg_name=True
+    )
+    .add_election_aggregator(
         name="sb1011_data",
         elections=[
             "2016PRE", "2016GOV", "2016ATG", "2016AUD", "2016TRE",
@@ -136,8 +176,37 @@ cfg = (cfg
             "efficiency_gap", "stdev_partisan_share",
             "majority_partisan_shares", "majority_seats",
         ],
+        prepend_agg_name=True,
     )
 )
+
+save_dir = f"output/{config_tag}/{run_name}"
+os.makedirs(os.path.join(save_dir, "maps"), exist_ok=True)
+
+print(f"Output will be saved to {save_dir}")
+cfg.to_config(os.path.join(save_dir, "config.yaml"))
+
+print("Computing performance of comparison maps")
+def compute_metrics_for_map(shapefile_path, geo, cfg, pop_key=params["data_tag"]):
+    """Return a dict of output_updater values for a given electoral map."""
+    partition = geo.build_partition(
+        pop_key=pop_key,
+        plan=shapefile_path,
+        updaters=cfg.updaters,
+    )
+    return nbh.get_updater_values(partition, cfg.updaters_to_save)
+
+comparison_maps = {}
+for k, v in params["comparison_maps"].items():
+    comparison_maps[k] = compute_metrics_for_map(v, geo, cfg)
+
+with open(f"output/{config_tag}/ensemble/comparison_maps.json", "w") as f:
+    json.dump(comparison_maps, f, indent=2)
+
+munis, counties = nbh.load_boundaries_from_shapefiles()
+
+from gerrychain.accept import always_accept
+import utgc.plotting as gcplt
 
 initial_partition = geo.build_partition(
     pop_key=params["data_tag"],
@@ -147,24 +216,7 @@ initial_partition = geo.build_partition(
 total_pop = sum(initial_partition["population"].values())
 pop_tolerance = params["pop_tolerance"]
 
-import json
-import utgc.plotting as gcplt
-
-munis, counties = nbh.load_boundaries_from_shapefiles()
-
-os.makedirs(os.path.join(save_dir, "maps"), exist_ok=True)
-cfg.to_config(os.path.join(save_dir, "config.yaml"))
-
-output_updaters = {
-    "split_muni", "split_county", "muni_multi_splits", "county_multi_splits",
-    "assignment_hash", "polsby_popper",
-    "majority_partisan_shares", "stdev_partisan_share", "efficiency_gap",
-    "mean_median", "partisan_bias", "partisan_bias_utah", "majority_seats",
-}
-print(f"Output will be saved to {save_dir}")
-
-from gerrychain.accept import always_accept
-
+num_steps = 100
 proposal = cfg.proposal(
     initial_partition,
     total_population=total_pop,
@@ -177,22 +229,17 @@ chain = CouponCollectorChain(
     accept=always_accept,
     initial_state=initial_partition,
     micro_steps_per_yield=ceil(coupon_collector_expectation(num_districts)),
-    num_macro_steps=max(0, num_steps - start_step),
+    num_macro_steps=num_steps,
 )
 
 print(f"=== MCMC {run_name} ===")
-if start_step >= num_steps:
-    print(f"Already reached desired {num_steps} steps. Skipping chain.")
-    partition_iterator = []
-else:
-    print("Running Markov chain (Batched/Coupon Collector)...")
-    partition_iterator = chain.with_progress_bar()
+print("Running Markov chain (Batched/Coupon Collector)...")
+partition_iterator = chain.with_progress_bar()
 
 output_path = os.path.join(save_dir, "output.jsonl")
-assignments_path = os.path.join(save_dir, "assignments.jsonl")
-file_mode = "a" if start_step > 0 else "w"
-with open(output_path, file_mode) as f:
-    for step_number, partition in enumerate(partition_iterator, start=start_step):
+
+with open(output_path, "w") as f:
+    for step_number, partition in enumerate(partition_iterator):
         # Save metrics (output_updaters subset only)
         data = (
             {"step": step_number}
@@ -220,34 +267,16 @@ with open(output_path, file_mode) as f:
             counties=counties, municipalities=munis,
             split_munis_count=partition["split_muni"],
             split_counties_count=partition["split_county"],
-            color_by="majority_partisan_shares",
+            color_by="2024_majority_partisan_shares",
             colormap="coolwarm"
         )
         partition.parent = None
-print("Done.")
 
-print("Computing performance of comparison maps")
-def compute_metrics_for_map(shapefile_path, geo, cfg, pop_key=params["data_tag"]):
-    """Return a dict of output_updater values for a given electoral map."""
-    partition = geo.build_partition(
-        pop_key=pop_key,
-        plan=shapefile_path,
-        updaters=cfg.updaters,
-    )
-    return nbh.get_updater_values(partition, cfg.updaters_to_save)
-
-comparison_maps = {}
-for k, v in params["comparison_maps"].items():
-    comparison_maps[k] = compute_metrics_for_map(v, geo, cfg)
-
-with open(f"output/{config_tag}/ensemble/comparison_maps.json", "w") as f:
-    json.dump(comparison_maps, f, indent=2)
+print("Done!")
 
 import utgc.results as gcres
 import utgc.plotting as gcplt
 import matplotlib.pyplot as plt
-
-import json
 
 if "comparison_maps" not in locals():
     with open(f"output/{config_tag}/ensemble/comparison_maps.json", "r") as f:
