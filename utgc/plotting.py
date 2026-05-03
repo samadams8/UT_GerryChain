@@ -18,6 +18,7 @@ def distribution_plot(
     highlight_interval=[],
     relative_to_median=False,
     use_kde=False,
+    ax=None,
     ):
     if not results.ndim == 1:
         raise ValueError("distribution_plot only supports 1D results")
@@ -33,31 +34,34 @@ def distribution_plot(
 
     x_median = plt_medians
 
+    if ax is None:
+        ax = plt.gca()
+
     if use_kde:
-        sns.kdeplot(data=plot_df, fill=True, color='black')
-        sns.rugplot(data=plot_df, color='black')
+        sns.kdeplot(data=plot_df, fill=True, color='black', ax=ax)
+        sns.rugplot(data=plot_df, color='black', ax=ax)
     else:
-        sns.histplot(data=plot_df, color='gray')
+        sns.histplot(data=plot_df, color='gray', ax=ax)
 
     # Median
-    plt.axvline(x_median, linestyle='--', color='white' if highlight_interval else 'black')
-    plt.text(x_median, plt.gca().get_ylim()[1], ' 50%', ha='center', va='bottom', fontsize=10, rotation=90)
+    ax.axvline(x_median, linestyle='--', color='white' if highlight_interval else 'black')
+    ax.text(x_median, ax.get_ylim()[1], ' 50%', ha='center', va='bottom', fontsize=10, rotation=90)
 
     if highlight_interval:
         percentiles = plot_df.quantile(highlight_interval)
 
         x_low = percentiles.loc[highlight_interval[0]]
         x_high = percentiles.loc[highlight_interval[1]]
-        plt.axvspan(x_low, x_high, color='gray', alpha=0.3)
+        ax.axvspan(x_low, x_high, color='gray', alpha=0.3)
         # Lower bound
         if highlight_interval[0] > 0:
-            plt.text(x_low, plt.gca().get_ylim()[1], f' {highlight_interval[0]:.1%}', ha='center', va='bottom', fontsize=10, rotation=90)
+            ax.text(x_low, ax.get_ylim()[1], f' {highlight_interval[0]:.1%}', ha='center', va='bottom', fontsize=10, rotation=90)
 
         # Upper bound
         if highlight_interval[1] < 1:
-            plt.text(x_high, plt.gca().get_ylim()[1], f' {highlight_interval[1]:.1%}', ha='center', va='bottom', fontsize=10, rotation=90)
+            ax.text(x_high, ax.get_ylim()[1], f' {highlight_interval[1]:.1%}', ha='center', va='bottom', fontsize=10, rotation=90)
 
-    y_max = max(plt.gca().get_ylim())
+    y_max = max(ax.get_ylim())
 
     if reference_values:
         markers = ['o', '^', 's', 'v', 'D'] * ceil(len(reference_values) / 6)
@@ -66,15 +70,16 @@ def distribution_plot(
         for i, (label, ref_val) in enumerate(reference_values.items()):
             if relative_to_median:
                 ref_val = ref_val - medians
-            plt.plot(ref_val, y_max/20, markers[i], mec=colors[i], mfc="None", label=label)
+            ax.plot(ref_val, y_max/20, markers[i], mec=colors[i], mfc="None", label=label)
 
-        plt.legend()
+        ax.legend()
 
 def district_plot(
         results,
         reference_values={},
         highlight_interval=[],
-        relative_to_median=False
+        relative_to_median=False,
+        ax=None
     ):
 
     # Calculate medians per district
@@ -86,8 +91,12 @@ def district_plot(
         plot_df = results
         plt_medians = medians
 
-    sns.violinplot(data=plot_df, orient='v', inner=None, color='gray')
-    plt.xticks(range(len(plot_df.columns)), range(1,len(plot_df.columns)+1))
+    if ax is None:
+        ax = plt.gca()
+
+    sns.violinplot(data=plot_df, orient='v', inner=None, color='gray', ax=ax)
+    ax.set_xticks(range(len(plot_df.columns)))
+    ax.set_xticklabels(range(1,len(plot_df.columns)+1))
 
     if highlight_interval:
         percentiles = plot_df.quantile(highlight_interval)
@@ -95,9 +104,9 @@ def district_plot(
         for i, col in enumerate(plot_df.columns):
             y_low = percentiles.loc[highlight_interval[0], col]
             y_high = percentiles.loc[highlight_interval[1], col]
-            plt.plot([i, i], [y_low, y_high], color='black', lw=2)
+            ax.plot([i, i], [y_low, y_high], color='black', lw=2)
             y_median = plt_medians[col]
-            plt.plot(i, y_median, marker='o', mfc='white', mec='k', markersize=5)
+            ax.plot(i, y_median, marker='o', mfc='white', mec='k', markersize=5)
     
     if reference_values:
         markers = ['o', '^', 's', 'v', 'D'] * ceil(len(reference_values) / 6)
@@ -111,9 +120,9 @@ def district_plot(
                     continue  # skip if data not provided for this district
                 if relative_to_median:
                     value = value - medians.iloc[rank_idx]
-                plt.plot(rank_idx, value, markers[i], mec=colors[i], mfc="None", label=label if rank_idx == 0 else "")
+                ax.plot(rank_idx, value, markers[i], mec=colors[i], mfc="None", label=label if rank_idx == 0 else "")
 
-        plt.legend()
+        ax.legend()
 
 def _find_wasatch_front_bounds(counties_gdf):
         """Return padded, custom bounds for a Wasatch Front zoom.
