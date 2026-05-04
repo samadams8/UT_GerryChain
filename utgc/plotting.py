@@ -72,8 +72,6 @@ def distribution_plot(
                 ref_val = ref_val - medians
             ax.plot(ref_val, y_max/20, markers[i], mec=colors[i], mfc="None", label=label)
 
-        ax.legend()
-
 def district_plot(
         results,
         reference_values={},
@@ -121,8 +119,6 @@ def district_plot(
                 if relative_to_median:
                     value = value - medians.iloc[rank_idx]
                 ax.plot(rank_idx, value, markers[i], mec=colors[i], mfc="None", label=label if rank_idx == 0 else "")
-
-        ax.legend()
 
 def _find_wasatch_front_bounds(counties_gdf):
         """Return padded, custom bounds for a Wasatch Front zoom.

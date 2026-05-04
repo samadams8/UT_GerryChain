@@ -122,21 +122,8 @@ cfg = (cfg
         skip_if_missing_parties=True
     )
     .add_election_aggregator(
-        name="2016",
-        elections=["2016PRE", "2016GOV", "2016ATG"],
-        parties=["D", "R", "-"],
-    )
-    .add_election_metric_updaters(
-        "2016",
-        [
-            "efficiency_gap", "stdev_partisan_share",
-            "majority_partisan_shares", "majority_seats",
-        ],
-        prepend_agg_name=True
-    )
-    .add_election_aggregator(
         name="2020",
-        elections=["2020PRE", "2020GOV", "2020ATG"],
+        elections=["2020PRE"],
         parties=["D", "R", "-"],
     )
     .add_election_metric_updaters(
@@ -149,7 +136,7 @@ cfg = (cfg
     )
     .add_election_aggregator(
         name="2024",
-        elections=["2024PRE", "2024GOV", "2024ATG"],
+        elections=["2024PRE"],
         parties=["D", "R", "-"],
     )
     .add_election_metric_updaters(
@@ -186,22 +173,28 @@ os.makedirs(os.path.join(save_dir, "maps"), exist_ok=True)
 print(f"Output will be saved to {save_dir}")
 cfg.to_config(os.path.join(save_dir, "config.yaml"))
 
-print("Computing performance of comparison maps")
-def compute_metrics_for_map(shapefile_path, geo, cfg, pop_key=params["data_tag"]):
-    """Return a dict of output_updater values for a given electoral map."""
-    partition = geo.build_partition(
-        pop_key=pop_key,
-        plan=shapefile_path,
-        updaters=cfg.updaters,
-    )
-    return nbh.get_updater_values(partition, cfg.updaters_to_save)
+comparison_maps_path = os.path.join(save_dir, "comparison_maps.json")
+if start_step > 0 and os.path.exists(comparison_maps_path):
+    print("Loading pre-computed comparison maps performance")
+    with open(comparison_maps_path, "r") as f:
+        comparison_maps = json.load(f)
+else:
+    print("Computing performance of comparison maps")
+    def compute_metrics_for_map(shapefile_path, geo, cfg, pop_key=params["data_tag"]):
+        """Return a dict of output_updater values for a given electoral map."""
+        partition = geo.build_partition(
+            pop_key=pop_key,
+            plan=shapefile_path,
+            updaters=cfg.updaters,
+        )
+        return nbh.get_updater_values(partition, cfg.updaters_to_save)
 
-comparison_maps = {}
-for k, v in params["comparison_maps"].items():
-    comparison_maps[k] = compute_metrics_for_map(v, geo, cfg)
+    comparison_maps = {}
+    for k, v in params["comparison_maps"].items():
+        comparison_maps[k] = compute_metrics_for_map(v, geo, cfg)
 
-with open(f"output/{config_tag}/ensemble/comparison_maps.json", "w") as f:
-    json.dump(comparison_maps, f, indent=2)
+    with open(comparison_maps_path, "w") as f:
+        json.dump(comparison_maps, f, indent=2)
 
 munis, counties = nbh.load_boundaries_from_shapefiles()
 
@@ -216,7 +209,7 @@ initial_partition = geo.build_partition(
 total_pop = sum(initial_partition["population"].values())
 pop_tolerance = params["pop_tolerance"]
 
-num_steps = 100
+remaining_steps = max(0, num_steps - start_step)
 proposal = cfg.proposal(
     initial_partition,
     total_population=total_pop,
@@ -229,7 +222,7 @@ chain = CouponCollectorChain(
     accept=always_accept,
     initial_state=initial_partition,
     micro_steps_per_yield=ceil(coupon_collector_expectation(num_districts)),
-    num_macro_steps=num_steps,
+    num_macro_steps=remaining_steps,
 )
 
 print(f"=== MCMC {run_name} ===")
@@ -238,8 +231,158 @@ partition_iterator = chain.with_progress_bar()
 
 output_path = os.path.join(save_dir, "output.jsonl")
 
-with open(output_path, "w") as f:
-    for step_number, partition in enumerate(partition_iterator):
+# import utgc.results as gcres
+# import utgc.plotting as gcplt
+# import matplotlib.pyplot as plt
+
+# def update_metrics_plot(output_path, comparison_maps, handles, in_jupyter):
+#     import os
+#     if not os.path.exists(output_path):
+#         return handles
+    
+#     datasets = ["sb1011_data", "2020", "2024"]
+#     metrics = ["majority_partisan_shares", "stdev_partisan_share", "majority_seats"]
+    
+#     columns_to_read = [f"{ds}_{m}" for ds in datasets for m in metrics]
+#     try:
+#         import pandas as pd
+#         df = gcres.read_jsonl_table(output_path, columns_to_read)
+#         df = df.apply(pd.to_numeric, errors='coerce')
+#     except Exception as e:
+#         print(f"Error reading jsonl: {e}")
+#         return handles
+        
+#     if df.empty:
+#         return handles
+        
+#     figs = []
+#     axes_list = []
+    
+#     if in_jupyter:
+#         for _ in range(3):
+#             fig, axes = plt.subplots(3, 1, figsize=(6, 12), dpi=100)
+#             figs.append(fig)
+#             axes_list.append(axes)
+#     else:
+#         if handles is not None and isinstance(handles, list) and all(isinstance(h, plt.Figure) for h in handles):
+#             figs = handles
+#             for fig in figs:
+#                 fig.clf()
+#                 axes_list.append(fig.subplots(4, 1))
+#         else:
+#             for _ in range(3):
+#                 fig = plt.figure()
+#                 axes_list.append(fig.subplots(4, 1))
+#                 figs.append(fig)
+    
+#     for i, ds in enumerate(datasets):
+#         # majority_partisan_shares
+#         col_mps = f"{ds}_majority_partisan_shares"
+#         if f"{col_mps}_0" in df.columns:
+#             df_mps = gcres.sort_subentries(df, col_mps)
+#             mps_cols = [c for c in df_mps.columns if c.startswith(f"{col_mps}_")]
+            
+#             ref_vals_mps = {}
+#             for k, v in comparison_maps.items():
+#                 if col_mps in v and isinstance(v[col_mps], dict):
+#                     ref_vals_mps[k] = sorted(v[col_mps].values())
+            
+#             gcplt.district_plot(
+#                 df_mps[mps_cols],
+#                 reference_values=ref_vals_mps,
+#                 ax=axes_list[0][i]
+#             )
+#             axes_list[0][i].set_ylabel(ds, fontsize=12, fontweight='bold')
+#             if i == 0:
+#                 axes_list[0][i].set_title("Ranked Partisan Share")
+                
+#         # stdev_partisan_share
+#         col_stdev = f"{ds}_stdev_partisan_share"
+#         if col_stdev in df.columns:
+#             ref_vals_stdev = {}
+#             for k, v in comparison_maps.items():
+#                 if col_stdev in v and not isinstance(v[col_stdev], dict):
+#                     ref_vals_stdev[k] = v[col_stdev]
+                    
+#             gcplt.distribution_plot(
+#                 df[col_stdev].dropna(),
+#                 highlight_interval=[0.025, 0.975],
+#                 reference_values=ref_vals_stdev,
+#                 ax=axes_list[1][i]
+#             )
+#             axes_list[1][i].set_ylabel(ds, fontsize=12, fontweight='bold')
+#             if i == 0:
+#                 axes_list[1][i].set_title("Stdev Partisan Share")
+                
+#         # majority_seats
+#         col_seats = f"{ds}_majority_seats"
+#         if col_seats in df.columns:
+#             ref_vals_seats = {}
+#             for k, v in comparison_maps.items():
+#                 if col_seats in v and not isinstance(v[col_seats], dict):
+#                     ref_vals_seats[k] = v[col_seats]
+                    
+#             gcplt.distribution_plot(
+#                 df[col_seats].dropna(),
+#                 highlight_interval=[0.025, 0.975],
+#                 reference_values=ref_vals_seats,
+#                 ax=axes_list[2][i]
+#             )
+#             axes_list[2][i].set_ylabel(ds, fontsize=12, fontweight='bold')
+#             if i == 0:
+#                 axes_list[2][i].set_title("Majority Seats")
+                
+#     for f in figs:
+#         f.tight_layout()
+        
+#     if in_jupyter:
+#         if handles is not None and len(handles) == 3 and hasattr(handles[0], 'update'):
+#             for j in range(3):
+#                 handles[j].update(figs[j])
+#         else:
+#             try:
+#                 from IPython.display import clear_output, display
+#                 clear_output(wait=True)
+#                 for f in figs:
+#                     display(f)
+#             except Exception:
+#                 pass
+#         for f in figs:
+#             plt.close(f)
+#         return handles
+#     else:
+#         plt.show(block=False)
+#         plt.pause(0.1)
+#         return figs
+
+# in_jupyter = False
+# try:
+#     from IPython import get_ipython
+#     if get_ipython() is not None and get_ipython().__class__.__name__ == 'ZMQInteractiveShell':
+#         in_jupyter = True
+# except Exception:
+#     pass
+
+# plot_handles = None
+# if in_jupyter:
+#     try:
+#         from IPython.display import display
+#         plot_handles = [
+#             display("Initializing Partisan Share plots...", display_id=True),
+#             display("Initializing Stdev plots...", display_id=True),
+#             display("Initializing Seats plots...", display_id=True)
+#         ]
+#     except Exception:
+#         pass
+# else:
+#     plt.ion()
+
+# plot_handles = update_metrics_plot(output_path, comparison_maps, plot_handles, in_jupyter)
+
+file_mode = "a" if start_step > 0 else "w"
+with open(output_path, file_mode) as f:
+    for idx, partition in enumerate(partition_iterator):
+        step_number = idx + start_step
         # Save metrics (output_updaters subset only)
         data = (
             {"step": step_number}
@@ -270,6 +413,10 @@ with open(output_path, "w") as f:
             color_by="2024_majority_partisan_shares",
             colormap="coolwarm"
         )
+        
+        # if step_number > start_step and (step_number - start_step) % 5 == 0:
+        #     plot_handles = update_metrics_plot(output_path, comparison_maps, plot_handles, in_jupyter)
+            
         partition.parent = None
 
 print("Done!")

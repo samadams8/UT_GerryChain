@@ -6,6 +6,9 @@ from IPython.display import display
 import ipywidgets as widgets
 from PIL import Image
 from typing import Optional, Literal
+import matplotlib.pyplot as plt
+import utgc.results as gcres
+import utgc.plotting as gcplt
 
 def get_notebook_params(map_type: Literal["us_house", "ut_house", "ut_senate"]):
     if map_type == "us_house":
@@ -327,6 +330,60 @@ def get_updater_values(partition, updaters_to_save):
         if isinstance(value, dict):
             data[name] = {str(k): v for k, v in sorted(value.items())}
         else:
-            data[name] = str(value)
+            data[name] = value
     
     return data
+
+def multi_districts_figure(setnames, metricname, output_path, comparison_maps, highlight_interval=[0.025, 0.975], relative_to_median=False, hline_value=None):
+    fig, axes = plt.subplots(len(setnames), 1, dpi=300)
+    for setindex, setname in enumerate(setnames):
+        if hline_value is not None:
+            axes[setindex].axhline(hline_value, color='black', linestyle='--')
+        datakey = setname + "_majority_partisan_shares"
+        party_shares = gcres.read_jsonl_table(output_path, datakey)
+        party_shares = gcres.sort_subentries(party_shares, datakey)
+        gcplt.district_plot(
+            party_shares,
+            highlight_interval=[0.025, 0.975],
+            reference_values={
+                k: sorted(v[datakey].values()) for k, v in comparison_maps.items()
+            },
+            relative_to_median=False,
+            ax=axes[setindex]
+        )
+        axes[setindex].set_ylabel(setname)
+
+    min_y = min(ax.get_ylim()[0] for ax in axes)
+    max_y = max(ax.get_ylim()[1] for ax in axes)
+    for ax in axes:
+        ax.set_ylim(min_y, max_y)
+
+    axes[-1].set_xlabel(metricname.replace("_", " "))
+    
+    return fig
+
+def multi_distribution_figure(setnames, metricname, output_path, comparison_maps, highlight_interval=[0.025, 0.975], relative_to_median=False):
+    fig, axes = plt.subplots(len(setnames), 1, dpi=300)
+    for setindex, setname in enumerate(setnames):
+        datakey = setname + "_" + metricname
+        vals = gcres.read_jsonl_table(output_path, datakey)
+        gcplt.distribution_plot(
+            vals[datakey],
+            highlight_interval=highlight_interval,
+            reference_values={
+                mapname: stats[datakey]
+                for mapname, stats in comparison_maps.items()
+            },
+            relative_to_median=relative_to_median,
+            ax=axes[setindex]
+        )
+        axes[setindex].set_ylabel(setname.replace("_", " "))
+
+    min_x = min(ax.get_xlim()[0] for ax in axes)
+    max_x = max(ax.get_xlim()[1] for ax in axes)
+    for ax in axes:
+        ax.set_xlim(min_x, max_x)
+
+    axes[-1].set_xlabel(metricname.replace("_", " "))
+
+    return fig

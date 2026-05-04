@@ -196,7 +196,7 @@ class ConfigurationManager:
             name=ls_name,
             col_id=column_id,
             pop_col=self.population_params["column_id"],
-            scores_to_compute=["num_split_localities", "num_parts"],
+            scores_to_compute=["num_split_localities", "num_parts", "num_pieces"],
         )
         if ignore_ls_output and ls_name not in self.ignored_updaters:
             self.ignored_updaters.append(ls_name)
@@ -205,6 +205,10 @@ class ConfigurationManager:
         self.updaters[sname] = lambda p, ls=ls_name: p[ls].get("num_split_localities", 0)
         msname = f"{name}_multi_splits"
 
+        # def _multi_splits_fn(p, ls=ls_name, sn=sname, col=column_id):
+        #     num_localities = len(set(dict(p.graph.nodes(data=col)).values()))
+        #     return p[ls].get("num_pieces", 0) - num_localities
+        
         def _multi_splits_fn(p, ls=ls_name, sn=sname, col=column_id):
             num_localities = len(set(dict(p.graph.nodes(data=col)).values()))
             return p[ls].get("num_parts", 0) - p[sn] - num_localities
