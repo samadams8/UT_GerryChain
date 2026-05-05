@@ -71,3 +71,5 @@ The geojson files use the following column names for Communities of Interest:
 - `SCHDISTID`: School districts
 
 Note: WATER_ID and BASIN_ID are no longer used.
+
+

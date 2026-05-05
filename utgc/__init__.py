@@ -5,6 +5,8 @@ from .proposals import create_recom_proposal
 from .preconditioning import precondition
 from .chain import create_partition_iterator
 
+__version__ = "0.1.2"
+
 __all__ = [
     "ConfigurationManager",
     "GeographyManager",

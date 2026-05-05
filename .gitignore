@@ -11,3 +11,5 @@ todos.md
 __pycache__/
 *.pyc
 .vscode/
+dist/*
+utgc.egg-info/*

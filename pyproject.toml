@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "utgc"
+version = "0.1.2"
+description = "GerryChain utilities for nonpartisan Utah redistricting ensembles"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    {name = "Samuel Adams", email = "sadams144@icloud.com"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: GIS",
+]
+dependencies = [
+    "gerrychain>=0.3.0",
+    "pandas>=2.3.1",
+    "geopandas>=1.1.1",
+    "numpy>=2.3.2",
+    "networkx>=3.0",
+    "matplotlib>=3.5.0",
+    "seaborn>=0.12.0",
+    "PyYAML>=6.0",
+    "maup>=2.0.0",
+    "tqdm>=4.64.0",
+    "pillow>=9.0.0"
+]
+
+[project.optional-dependencies]
+notebook = [
+    "ipython>=8.0.0",
+    "ipywidgets>=8.0.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["utgc*"]
+exclude = ["tests*", "docs*", "notebooks*"]
+
+[tool.setuptools.package-data]
+utgc = ["py.typed", "*.pyi", "data/*", "maps/*"]
