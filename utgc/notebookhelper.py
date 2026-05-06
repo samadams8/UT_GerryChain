@@ -22,12 +22,12 @@ def _resolve_path(rel_path: str) -> str:
     Attempt to resolve a path from the installed 'utgc' package.
     Falls back to the local relative path if not found in the package.
     """
-    try:
-        pkg_path = files("utgc").joinpath(rel_path)
-        if pkg_path.exists():
-            return str(pkg_path)
-    except Exception:
-        pass
+    # try:
+    #     pkg_path = files("utgc").joinpath(rel_path)
+    #     if pkg_path.exists():
+    #         return str(pkg_path)
+    # except Exception:
+    #     pass
     return rel_path
 
 def get_notebook_params(map_type: Literal["us_house", "ut_house", "ut_senate"]):
