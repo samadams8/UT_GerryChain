@@ -32,12 +32,6 @@ dependencies = [
     "pillow>=9.0.0"
 ]
 
-[project.optional-dependencies]
-notebook = [
-    "ipython>=8.0.0",
-    "ipywidgets>=8.0.0"
-]
-
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["utgc*"]
