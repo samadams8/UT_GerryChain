@@ -10,73 +10,73 @@ import matplotlib.pyplot as plt
 import utgc.results as gcres
 import utgc.plotting as gcplt
 
-import sys
-if sys.version_info >= (3, 9):
-    from importlib.resources import files
-else:
-    # Fallback for older python, though pyproject.toml requires >=3.9
-    from importlib_resources import files
+import warnings
 
-def _resolve_path(rel_path: str) -> str:
-    """
-    Attempt to resolve a path from the installed 'utgc' package.
-    Falls back to the local relative path if not found in the package.
-    """
-    # try:
-    #     pkg_path = files("utgc").joinpath(rel_path)
-    #     if pkg_path.exists():
-    #         return str(pkg_path)
-    # except Exception:
-    #     pass
-    return rel_path
+def suppress_colab_warnings():
+    # Suppress the datetime deprecation warning from Jupyter
+    warnings.filterwarnings(
+        "ignore", 
+        category=DeprecationWarning, 
+        module="jupyter_client"
+    )
 
-def get_notebook_params(map_type: Literal["us_house", "ut_house", "ut_senate"]):
+    # Suppress the NA values warnings from GerryChain
+    warnings.filterwarnings(
+        "ignore", 
+        category=UserWarning, 
+        module="gerrychain"
+    )
+
+def get_notebook_params(
+    map_type: Literal["us_house", "ut_house", "ut_senate"],
+    repo_dir: str = ".",
+):
     if map_type == "us_house":
         return {
             "prefix": "us_house",
             "data_tag": "d4-cap",
-            "data_path": _resolve_path("data/UT_capped_d4_eps1e-3.zip"),
-            "transitability_path": _resolve_path("data/UT_capped_d4_eps1e-3_transitability.csv"),
-            "init_plan_path": _resolve_path("maps/US-House/preconditioned_1000.zip"),
+            "data_path": os.path.join(repo_dir, "data/UT_capped_d4_eps1e-3.zip"),
+            "transitability_path": os.path.join(repo_dir, "data/UT_capped_d4_eps1e-3_transitability.csv"),
+            "init_plan_path": os.path.join(repo_dir, "maps/US-House/preconditioned_1000.zip"),
             "pop_tolerance": 0.001,
             "comparison_maps": {
-                "Map C": _resolve_path("maps/US-House/2025_USH_Leg-C/2025_USH_Leg-C.shp"),
-                "Plaintiff 1": _resolve_path("maps/US-House/2025_USH_Plaintiff-1/2025_USH_Plaintiff-1.shp"),
-                "Plaintiff 2": _resolve_path("maps/US-House/2025_USH_Plaintiff-2/2025_USH_Plaintiff-2.shp"),
-                "2021 Enacted": _resolve_path("maps/US-House/2021_USH_Enacted/2021_USH_Enacted.shp"),
-                "UIRC Orange": _resolve_path("maps/US-House/2021_USH_UIRC-Orange/2021_USH_UIRC-Orange.shp"),
-                "UIRC Purple": _resolve_path("maps/US-House/2021_USH_UIRC-Purple/2021_USH_UIRC-Purple.shp"),
-                "UIRC Public": _resolve_path("maps/US-House/2021_USH_UIRC-Public/2021_USH_UIRC-Public.shp"),
+                "Map C": os.path.join(repo_dir, "maps/US-House/2025_USH_Leg-C/2025_USH_Leg-C.shp"),
+                "Plaintiff 1": os.path.join(repo_dir, "maps/US-House/2025_USH_Plaintiff-1/2025_USH_Plaintiff-1.shp"),
+                "Plaintiff 2": os.path.join(repo_dir, "maps/US-House/2025_USH_Plaintiff-2/2025_USH_Plaintiff-2.shp"),
+                "2021 Enacted": os.path.join(repo_dir, "maps/US-House/2021_USH_Enacted/2021_USH_Enacted.shp"),
+                "UIRC Orange": os.path.join(repo_dir, "maps/US-House/2021_USH_UIRC-Orange/2021_USH_UIRC-Orange.shp"),
+                "UIRC Purple": os.path.join(repo_dir, "maps/US-House/2021_USH_UIRC-Purple/2021_USH_UIRC-Purple.shp"),
+                "UIRC Public": os.path.join(repo_dir, "maps/US-House/2021_USH_UIRC-Public/2021_USH_UIRC-Public.shp"),
             },
         }
     elif map_type == "ut_senate":
         return {
             "prefix": "ut_senate",
             "data_tag": "d29-cap",
-            "data_path": _resolve_path("data/UT_capped_d29_eps1e-3.zip"),
-            "transitability_path": _resolve_path("data/UT_capped_d29_eps1e-3_transitability.csv"),
-            "init_plan_path": _resolve_path("maps/UT-Senate/preconditioned_3000.zip"),
+            "data_path": os.path.join(repo_dir, "data/UT_capped_d29_eps1e-3.zip"),
+            "transitability_path": os.path.join(repo_dir, "data/UT_capped_d29_eps1e-3_transitability.csv"),
+            "init_plan_path": os.path.join(repo_dir, "maps/UT-Senate/preconditioned_3000.zip"),
             "pop_tolerance": 0.01,
             "comparison_maps": {
-                "Enacted": _resolve_path("maps/UT-Senate/2021_UTS_Enacted/2021_UTS_Enacted.shp"),
-                "UIRC Green": _resolve_path("maps/UT-Senate/2021_UTS_UIRC-Green/2021_UTS_UIRC-Green.shp"),
-                "UIRC Orange": _resolve_path("maps/UT-Senate/2021_UTS_UIRC-Orange/2021_UTS_UIRC-Orange.shp"),
-                "UIRC Purple": _resolve_path("maps/UT-Senate/2021_UTS_UIRC-Purple/2021_UTS_UIRC-Purple.shp"),
+                "Enacted": os.path.join(repo_dir, "maps/UT-Senate/2021_UTS_Enacted/2021_UTS_Enacted.shp"),
+                "UIRC Green": os.path.join(repo_dir, "maps/UT-Senate/2021_UTS_UIRC-Green/2021_UTS_UIRC-Green.shp"),
+                "UIRC Orange": os.path.join(repo_dir, "maps/UT-Senate/2021_UTS_UIRC-Orange/2021_UTS_UIRC-Orange.shp"),
+                "UIRC Purple": os.path.join(repo_dir, "maps/UT-Senate/2021_UTS_UIRC-Purple/2021_UTS_UIRC-Purple.shp"),
             },
         }
     elif map_type == "ut_house":
         return {
             "prefix": "ut_house",
             "data_tag": "d75-cap",
-            "data_path": _resolve_path("data/UT_capped_d75_eps1e-3.zip"),
-            "transitability_path": _resolve_path("data/UT_capped_d75_eps1e-3_transitability.csv"),
-            "init_plan_path": _resolve_path("maps/UT-House/preconditioned_10000.zip"),
+            "data_path": os.path.join(repo_dir, "data/UT_capped_d75_eps1e-3.zip"),
+            "transitability_path": os.path.join(repo_dir, "data/UT_capped_d75_eps1e-3_transitability.csv"),
+            "init_plan_path": os.path.join(repo_dir, "maps/UT-House/preconditioned_10000.zip"),
             "pop_tolerance": 0.01,
             "comparison_maps": {
-                "Enacted": _resolve_path("maps/UT-House/2021_UTH_Enacted/2021_UTH_Enacted.shp"),
-                "UIRC Green": _resolve_path("maps/UT-House/2021_UTH_UIRC-Green/2021_UTH_UIRC-Green.shp"),
-                "UIRC Orange": _resolve_path("maps/UT-House/2021_UTH_UIRC-Orange/2021_UTH_UIRC-Orange.shp"),
-                "UIRC Purple": _resolve_path("maps/UT-House/2021_UTH_UIRC-Purple/2021_UTH_UIRC-Purple.shp"),
+                "Enacted": os.path.join(repo_dir, "maps/UT-House/2021_UTH_Enacted/2021_UTH_Enacted.shp"),
+                "UIRC Green": os.path.join(repo_dir, "maps/UT-House/2021_UTH_UIRC-Green/2021_UTH_UIRC-Green.shp"),
+                "UIRC Orange": os.path.join(repo_dir, "maps/UT-House/2021_UTH_UIRC-Orange/2021_UTH_UIRC-Orange.shp"),
+                "UIRC Purple": os.path.join(repo_dir, "maps/UT-House/2021_UTH_UIRC-Purple/2021_UTH_UIRC-Purple.shp"),
             },
         }
 
