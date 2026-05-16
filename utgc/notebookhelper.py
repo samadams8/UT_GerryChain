@@ -94,6 +94,7 @@ def load_boundaries_from_shapefiles(
     muni_shapefile: Optional[str] = None,
     county_path: Optional[str] = None,
     muni_path: Optional[str] = None,
+    repo_dir: str = ".",
 ):
     """
     Load municipality and county boundary GeoDataFrames from shapefiles.
@@ -117,6 +118,8 @@ def load_boundaries_from_shapefiles(
     muni_path : str, optional
         Absolute path to municipality shapefile. If provided, takes precedence over 
         bounds_dir + muni_shapefile.
+    repo_dir : str, optional
+        Path to the repository directory, by default "..".
     
     Returns
     -------
@@ -127,7 +130,7 @@ def load_boundaries_from_shapefiles(
     counties = None
     
     if bounds_dir is None:
-        bounds_dir = _resolve_path("data/bounds")
+        bounds_dir = os.path.join(repo_dir, "data/bounds")
     
     # Load county boundaries
     if county_path is None:
