@@ -1,3 +1,4 @@
+import argparse
 import os
 from datetime import datetime as dt
 from math import floor, ceil
@@ -8,16 +9,36 @@ import utgc.notebookhelper as nbh
 from utgc.chain import CouponCollectorChain, coupon_collector_expectation
 from gerrychain.chain import MarkovChain
 
-params = nbh.get_notebook_params("us_house")
+# Parse command line arguments
+parser = argparse.ArgumentParser(description="Run GerryChain Prop 4 criteria calculations.")
+parser.add_argument(
+    "--map-type",
+    choices=["us_house", "ut_senate", "ut_house"],
+    default="us_house",
+    help="Type of map to analyze (default: us_house)"
+)
+args = parser.parse_args()
+
+outputs_path = "output"
+repo_dir = "."
+map_type = args.map_type
+
+# Retrieves basic configuration parameters based on type of maps to draw
+params = nbh.get_notebook_params(map_type, repo_dir=repo_dir) #, data_option='blocks')
+# Total number of maps to draw
 num_steps = 100
 
 # Configuration files and example maps will be saved to a tagged directory
 config_tag = params["prefix"] + ""  # <-- Change this to something descriptive if desired
 
 # Where the configuration file and all related results will be saved
-config_dir = os.path.join("output", config_tag or dt.now().strftime("%Y%m%d%H%M%S"))
+config_dir = os.path.join(outputs_path, config_tag or dt.now().strftime("%Y%m%d%H%M%S"))
 run_name = "ensemble"
+
 save_dir = os.path.join(config_dir, run_name)
+os.makedirs(os.path.join(save_dir, "maps"), exist_ok=True)
+
+print(f"Output will be saved to {save_dir}")
 
 # Data file path
 geo = GeographyManager(
@@ -127,7 +148,7 @@ cfg = (cfg
         parties=["D", "R", "-"],
     )
     .add_election_metric_updaters(
-        "2020", 
+        "2020",
         [
             "efficiency_gap", "stdev_partisan_share",
             "majority_partisan_shares", "majority_seats",
@@ -148,7 +169,7 @@ cfg = (cfg
         prepend_agg_name=True
     )
     .add_election_aggregator(
-        name="sb1011_data",
+        name="SB1011",
         elections=[
             "2016PRE", "2016GOV", "2016ATG", "2016AUD", "2016TRE",
             "2020PRE", "2020GOV", "2020ATG",
@@ -157,7 +178,7 @@ cfg = (cfg
         parties=["D", "R", "-"],
     )
     .add_election_metric_updaters(
-        "sb1011_data",
+        "SB1011",
         [
             "partisan_bias_utah", "partisan_bias", "mean_median",
             "efficiency_gap", "stdev_partisan_share",
@@ -167,16 +188,12 @@ cfg = (cfg
     )
 )
 
-save_dir = f"output/{config_tag}/{run_name}"
-os.makedirs(os.path.join(save_dir, "maps"), exist_ok=True)
-
-print(f"Output will be saved to {save_dir}")
 cfg.to_config(os.path.join(save_dir, "config.yaml"))
 
-comparison_maps_path = os.path.join(save_dir, "comparison_maps.json")
-if start_step > 0 and os.path.exists(comparison_maps_path):
+comparison_results_path = os.path.join(save_dir, "comparison_maps.json")
+if os.path.exists(comparison_results_path):
     print("Loading pre-computed comparison maps performance")
-    with open(comparison_maps_path, "r") as f:
+    with open(comparison_results_path, "r") as f:
         comparison_maps = json.load(f)
 else:
     print("Computing performance of comparison maps")
@@ -191,15 +208,17 @@ else:
 
     comparison_maps = {}
     for k, v in params["comparison_maps"].items():
+        print(f"  {k}...")
         comparison_maps[k] = compute_metrics_for_map(v, geo, cfg)
 
-    with open(comparison_maps_path, "w") as f:
+    with open(comparison_results_path, "w") as f:
         json.dump(comparison_maps, f, indent=2)
-
-munis, counties = nbh.load_boundaries_from_shapefiles()
+    print("Done!")
 
 from gerrychain.accept import always_accept
 import utgc.plotting as gcplt
+
+munis, counties = nbh.load_boundaries_from_shapefiles(repo_dir=repo_dir)
 
 initial_partition = geo.build_partition(
     pop_key=params["data_tag"],
@@ -225,159 +244,15 @@ chain = CouponCollectorChain(
     num_macro_steps=remaining_steps,
 )
 
+import matplotlib.pyplot as plt
+import utgc.results as gcres
+import utgc.plotting as gcplt
+
 print(f"=== MCMC {run_name} ===")
 print("Running Markov chain (Batched/Coupon Collector)...")
 partition_iterator = chain.with_progress_bar()
 
 output_path = os.path.join(save_dir, "output.jsonl")
-
-# import utgc.results as gcres
-# import utgc.plotting as gcplt
-# import matplotlib.pyplot as plt
-
-# def update_metrics_plot(output_path, comparison_maps, handles, in_jupyter):
-#     import os
-#     if not os.path.exists(output_path):
-#         return handles
-    
-#     datasets = ["sb1011_data", "2020", "2024"]
-#     metrics = ["majority_partisan_shares", "stdev_partisan_share", "majority_seats"]
-    
-#     columns_to_read = [f"{ds}_{m}" for ds in datasets for m in metrics]
-#     try:
-#         import pandas as pd
-#         df = gcres.read_jsonl_table(output_path, columns_to_read)
-#         df = df.apply(pd.to_numeric, errors='coerce')
-#     except Exception as e:
-#         print(f"Error reading jsonl: {e}")
-#         return handles
-        
-#     if df.empty:
-#         return handles
-        
-#     figs = []
-#     axes_list = []
-    
-#     if in_jupyter:
-#         for _ in range(3):
-#             fig, axes = plt.subplots(3, 1, figsize=(6, 12), dpi=100)
-#             figs.append(fig)
-#             axes_list.append(axes)
-#     else:
-#         if handles is not None and isinstance(handles, list) and all(isinstance(h, plt.Figure) for h in handles):
-#             figs = handles
-#             for fig in figs:
-#                 fig.clf()
-#                 axes_list.append(fig.subplots(4, 1))
-#         else:
-#             for _ in range(3):
-#                 fig = plt.figure()
-#                 axes_list.append(fig.subplots(4, 1))
-#                 figs.append(fig)
-    
-#     for i, ds in enumerate(datasets):
-#         # majority_partisan_shares
-#         col_mps = f"{ds}_majority_partisan_shares"
-#         if f"{col_mps}_0" in df.columns:
-#             df_mps = gcres.sort_subentries(df, col_mps)
-#             mps_cols = [c for c in df_mps.columns if c.startswith(f"{col_mps}_")]
-            
-#             ref_vals_mps = {}
-#             for k, v in comparison_maps.items():
-#                 if col_mps in v and isinstance(v[col_mps], dict):
-#                     ref_vals_mps[k] = sorted(v[col_mps].values())
-            
-#             gcplt.district_plot(
-#                 df_mps[mps_cols],
-#                 reference_values=ref_vals_mps,
-#                 ax=axes_list[0][i]
-#             )
-#             axes_list[0][i].set_ylabel(ds, fontsize=12, fontweight='bold')
-#             if i == 0:
-#                 axes_list[0][i].set_title("Ranked Partisan Share")
-                
-#         # stdev_partisan_share
-#         col_stdev = f"{ds}_stdev_partisan_share"
-#         if col_stdev in df.columns:
-#             ref_vals_stdev = {}
-#             for k, v in comparison_maps.items():
-#                 if col_stdev in v and not isinstance(v[col_stdev], dict):
-#                     ref_vals_stdev[k] = v[col_stdev]
-                    
-#             gcplt.distribution_plot(
-#                 df[col_stdev].dropna(),
-#                 highlight_interval=[0.025, 0.975],
-#                 reference_values=ref_vals_stdev,
-#                 ax=axes_list[1][i]
-#             )
-#             axes_list[1][i].set_ylabel(ds, fontsize=12, fontweight='bold')
-#             if i == 0:
-#                 axes_list[1][i].set_title("Stdev Partisan Share")
-                
-#         # majority_seats
-#         col_seats = f"{ds}_majority_seats"
-#         if col_seats in df.columns:
-#             ref_vals_seats = {}
-#             for k, v in comparison_maps.items():
-#                 if col_seats in v and not isinstance(v[col_seats], dict):
-#                     ref_vals_seats[k] = v[col_seats]
-                    
-#             gcplt.distribution_plot(
-#                 df[col_seats].dropna(),
-#                 highlight_interval=[0.025, 0.975],
-#                 reference_values=ref_vals_seats,
-#                 ax=axes_list[2][i]
-#             )
-#             axes_list[2][i].set_ylabel(ds, fontsize=12, fontweight='bold')
-#             if i == 0:
-#                 axes_list[2][i].set_title("Majority Seats")
-                
-#     for f in figs:
-#         f.tight_layout()
-        
-#     if in_jupyter:
-#         if handles is not None and len(handles) == 3 and hasattr(handles[0], 'update'):
-#             for j in range(3):
-#                 handles[j].update(figs[j])
-#         else:
-#             try:
-#                 from IPython.display import clear_output, display
-#                 clear_output(wait=True)
-#                 for f in figs:
-#                     display(f)
-#             except Exception:
-#                 pass
-#         for f in figs:
-#             plt.close(f)
-#         return handles
-#     else:
-#         plt.show(block=False)
-#         plt.pause(0.1)
-#         return figs
-
-# in_jupyter = False
-# try:
-#     from IPython import get_ipython
-#     if get_ipython() is not None and get_ipython().__class__.__name__ == 'ZMQInteractiveShell':
-#         in_jupyter = True
-# except Exception:
-#     pass
-
-# plot_handles = None
-# if in_jupyter:
-#     try:
-#         from IPython.display import display
-#         plot_handles = [
-#             display("Initializing Partisan Share plots...", display_id=True),
-#             display("Initializing Stdev plots...", display_id=True),
-#             display("Initializing Seats plots...", display_id=True)
-#         ]
-#     except Exception:
-#         pass
-# else:
-#     plt.ion()
-
-# plot_handles = update_metrics_plot(output_path, comparison_maps, plot_handles, in_jupyter)
 
 file_mode = "a" if start_step > 0 else "w"
 with open(output_path, file_mode) as f:
@@ -413,45 +288,36 @@ with open(output_path, file_mode) as f:
             color_by="2024_majority_partisan_shares",
             colormap="coolwarm"
         )
-        
-        # if step_number > start_step and (step_number - start_step) % 5 == 0:
-        #     plot_handles = update_metrics_plot(output_path, comparison_maps, plot_handles, in_jupyter)
-            
+
         partition.parent = None
 
 print("Done!")
 
-import utgc.results as gcres
-import utgc.plotting as gcplt
-import matplotlib.pyplot as plt
-
-if "comparison_maps" not in locals():
-    with open(f"output/{config_tag}/ensemble/comparison_maps.json", "r") as f:
-        comparison_maps = json.load(f)
-
-output_path = f"output/{config_tag}/ensemble/output.jsonl"
+with open(comparison_results_path, "r") as f:
+    comparison_maps = json.load(f)
 
 # Partisan vote shares
-party_shares = gcres.read_jsonl_table(output_path, "majority_partisan_shares")
-party_shares = gcres.sort_subentries(party_shares, "majority_partisan_shares")
+party_shares = gcres.read_jsonl_table(output_path, "SB1011_majority_partisan_shares")
+party_shares = gcres.sort_subentries(party_shares, "SB1011_majority_partisan_shares")
 
 plt.figure(dpi=300, figsize=(6,4))
 gcplt.district_plot(
     party_shares,
     reference_values={
-        k: sorted(v["majority_partisan_shares"].values()) for k, v in comparison_maps.items()
+        k: sorted(v["SB1011_majority_partisan_shares"].values()) for k, v in comparison_maps.items()
     },
     relative_to_median=False
 )
 plt.xlabel("Ranked Partisan Share")
 plt.savefig(os.path.join(save_dir, "ensemble_partisan_shares.png"), dpi=300, bbox_inches='tight', facecolor='white')
 
+tmp = party_shares["SB1011_majority_partisan_shares_0"]
 plt.figure(dpi=300, figsize=(6,3))
 gcplt.distribution_plot(
-    party_shares["majority_partisan_shares_0"],
+    tmp,
     highlight_interval=[0.025, 0.975],
     reference_values={
-        mapname: min(stats["majority_partisan_shares"].values())
+        mapname: min(stats["SB1011_majority_partisan_shares"].values())
         for mapname, stats in comparison_maps.items()
     },
     relative_to_median=False,
@@ -459,13 +325,13 @@ gcplt.distribution_plot(
 plt.xlabel("Least-Republican District")
 plt.savefig(os.path.join(save_dir, "ensemble_least_rep_district.png"), dpi=300, bbox_inches='tight', facecolor='white')
 
-sdvs = gcres.read_jsonl_table(output_path, "stdev_partisan_share")
+sdvs = gcres.read_jsonl_table(output_path, "SB1011_stdev_partisan_share")
 plt.figure(dpi=300, figsize=(6,3))
 gcplt.distribution_plot(
-    sdvs["stdev_partisan_share"],
+    sdvs["SB1011_stdev_partisan_share"],
     highlight_interval=[0.025, 0.975],
     reference_values={
-        mapname: stats["stdev_partisan_share"]
+        mapname: stats["SB1011_stdev_partisan_share"]
         for mapname, stats in comparison_maps.items()
     },
     relative_to_median=False,

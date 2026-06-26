@@ -216,6 +216,7 @@ class GeographyManager:
         self._pop_data = dict(pop_data)
         self._crs = crs
         self._datasets: Dict[str, gpd.GeoDataFrame] = {}
+        self._base_graphs: Dict[str, Graph] = {}
         self._transitability: Dict[str, Dict[tuple, float]] = {}
         for key, value in self._pop_data.items():
             if isinstance(value, str):
@@ -364,8 +365,13 @@ class GeographyManager:
 
     def get_graph(self, key: str) -> Graph:
         """Return a GerryChain Graph from the population geodata for the given key."""
-        gdf = self.get_pop_geodata(key)
-        return Graph.from_geodataframe(gdf)
+        if key not in self._base_graphs:
+            gdf = self.get_pop_geodata(key)
+            self._base_graphs[key] = Graph.from_geodataframe(gdf)
+        graph = self._base_graphs[key].copy()
+        if hasattr(self._base_graphs[key], "geometry"):
+            graph.geometry = self._base_graphs[key].geometry
+        return graph
 
     def build_partition(
         self,
@@ -386,9 +392,22 @@ class GeographyManager:
             plan_gdf = plan
         if gdf.crs != plan_gdf.crs:
             plan_gdf = plan_gdf.to_crs(gdf.crs)
-        gdf_with_plan = gdf.copy()
-        gdf_with_plan["PLAN_ASSIGNMENT"] = maup.assign(gdf_with_plan, plan_gdf)
-        graph = Graph.from_geodataframe(gdf_with_plan)
+
+        # 1. Retrieve or cache the base graph (Adjacency doesn't change)
+        if pop_key not in self._base_graphs:
+            self._base_graphs[pop_key] = Graph.from_geodataframe(gdf)
+        graph = self._base_graphs[pop_key].copy()
+        if hasattr(self._base_graphs[pop_key], "geometry"):
+            graph.geometry = self._base_graphs[pop_key].geometry
+
+        # 2. Get the new assignments using maup (much faster than building graph)
+        assignment = maup.assign(gdf, plan_gdf)
+        assignment_dict = assignment.to_dict()
+
+        # 3. Apply assignment to the copied graph's nodes
+        for node, val in assignment_dict.items():
+            graph.nodes[node]["PLAN_ASSIGNMENT"] = val
+
         num_districts = len(plan_gdf)
         return build_initial_partition(
             graph,
@@ -403,6 +422,9 @@ class GeographyManager:
         Assign unique IDs only to entries that are None or empty (blank/NaN).
         Rows that already have a value are unchanged, including duplicates.
         """
+        # Clear base graph cache since the data is changing
+        if key in self._base_graphs:
+            del self._base_graphs[key]
         gdf = self.get_pop_geodata(key)
         for col in columns:
             if col not in gdf.columns:
