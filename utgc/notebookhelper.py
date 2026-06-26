@@ -30,9 +30,10 @@ def suppress_colab_warnings():
 def get_notebook_params(
     map_type: Literal["us_house", "ut_house", "ut_senate"],
     repo_dir: str = ".",
+    data_option: Literal["blocks", "d-capped"] = "d-capped",
 ):
     if map_type == "us_house":
-        return {
+        params = {
             "prefix": "us_house",
             "data_tag": "d4-cap",
             "data_path": os.path.join(repo_dir, "data/UT_capped_d4_eps1e-3.zip"),
@@ -50,7 +51,7 @@ def get_notebook_params(
             },
         }
     elif map_type == "ut_senate":
-        return {
+        params = {
             "prefix": "ut_senate",
             "data_tag": "d29-cap",
             "data_path": os.path.join(repo_dir, "data/UT_capped_d29_eps1e-3.zip"),
@@ -65,7 +66,7 @@ def get_notebook_params(
             },
         }
     elif map_type == "ut_house":
-        return {
+        params = {
             "prefix": "ut_house",
             "data_tag": "d75-cap",
             "data_path": os.path.join(repo_dir, "data/UT_capped_d75_eps1e-3.zip"),
@@ -79,6 +80,15 @@ def get_notebook_params(
                 "UIRC Purple": os.path.join(repo_dir, "maps/UT-House/2021_UTH_UIRC-Purple/2021_UTH_UIRC-Purple.shp"),
             },
         }
+    
+    if data_option == "blocks":
+        params.update({
+            "data_tag": "blocks",
+            "data_path": os.path.join(repo_dir, "data/UT_blocks.zip"),
+            "transitability_path": os.path.join(repo_dir, "data/UT_blocks_transitability.csv"),
+        })
+    
+    return params
 
 def get_district_count(shapefile_path):
     """
