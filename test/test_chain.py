@@ -57,27 +57,26 @@ class TestCouponCollectorChain(unittest.TestCase):
             num_macro_steps=10
         )
         items = list(chain)
-        # 0th iteration: returns initial state (0)
-        # 1st iteration: returns state after 5 proposals (0 + 5 = 5)
-        # 2nd iteration: returns state after 5 more proposals (5 + 5 = 10)
+        # 0th iteration: returns state after 5 calls (0 + 4 proposals = 4)
+        # 1st iteration: returns state after 5 more calls (4 + 5 proposals = 9)
         # ...
-        # 9th iteration (10th item): returns state after 5 * 9 = 45 micro-steps total (45)
-        self.assertEqual(items[0], 0)
-        self.assertEqual(items[1], 5)
-        self.assertEqual(items[-1], 45)
+        # 9th iteration (10th item): returns state after 50 calls (49 proposals = 49)
+        self.assertEqual(items[0], 4)
+        self.assertEqual(items[1], 9)
+        self.assertEqual(items[-1], 49)
 
     def test_coupon_collector_0th_iteration(self):
         chain = CouponCollectorChain(
             proposal=self.proposal,
             constraints=self.constraints,
             accept=self.accept,
-            initial_state=100,
+            initial_state=DummyPartition(100),
             micro_steps_per_yield=5,
             num_macro_steps=2
         )
         iterator = iter(chain)
         first_item = next(iterator)
-        self.assertEqual(first_item, 100)
+        self.assertEqual(first_item, 104)
         
     def test_create_partition_iterator_coupon_collector(self):
         iterator = create_partition_iterator(
